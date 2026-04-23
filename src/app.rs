@@ -35,6 +35,7 @@ pub struct App {
     tx: UnboundedSender<Message>,
 }
 
+#[allow(dead_code)]
 pub enum Message {
     Quit,
     Key(crossterm::event::KeyEvent),
@@ -67,6 +68,14 @@ pub enum Message {
     ScrollUp(usize),
     ScrollToRow(i64),
     ScrollToEnd,
+    MoveRight,
+    MoveLeft,
+    MoveDown,
+    MoveUp,
+    MoveColFirst,
+    MoveColLast,
+    MoveFirstCell,
+    MoveLastCell,
 }
 
 impl App {
@@ -243,6 +252,109 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Message::MoveDown => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.scroll_down(1);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::MoveUp => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.scroll_up(1);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::MoveRight => {
+                if let Some(ref mut grid) = self.grid {
+                    grid.move_col_right();
+                }
+                self.dirty = true;
+            }
+            Message::MoveLeft => {
+                if let Some(ref mut grid) = self.grid {
+                    grid.move_col_left();
+                }
+                self.dirty = true;
+            }
+            Message::MoveColFirst => {
+                if let Some(ref mut grid) = self.grid {
+                    grid.move_col_first();
+                }
+                self.dirty = true;
+            }
+            Message::MoveColLast => {
+                if let Some(ref mut grid) = self.grid {
+                    grid.move_col_last();
+                }
+                self.dirty = true;
+            }
+            Message::MoveFirstCell => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.focused_col = 0;
+                    grid.h_scroll = 0;
+                    grid.scroll_to_row(0);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::MoveLastCell => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.move_col_last();
+                    grid.scroll_to_end();
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
         }
     }
 
@@ -286,26 +398,38 @@ impl App {
     }
 
     fn handle_grid_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
         let vp = self.grid.as_ref().map_or(20, |g| g.window.viewport_rows);
-        match key.code {
-            KeyCode::PageDown => {
+        match (key.code, key.modifiers) {
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::MoveDown);
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::MoveUp);
+            }
+            (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::MoveRight);
+            }
+            (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::MoveLeft);
+            }
+            (KeyCode::Home, KeyModifiers::CONTROL) => {
+                let _ = self.tx.send(Message::MoveFirstCell);
+            }
+            (KeyCode::End, KeyModifiers::CONTROL) => {
+                let _ = self.tx.send(Message::MoveLastCell);
+            }
+            (KeyCode::Home, _) => {
+                let _ = self.tx.send(Message::MoveColFirst);
+            }
+            (KeyCode::End, _) => {
+                let _ = self.tx.send(Message::MoveColLast);
+            }
+            (KeyCode::PageDown, _) => {
                 let _ = self.tx.send(Message::ScrollDown(vp.saturating_sub(1)));
             }
-            KeyCode::PageUp => {
+            (KeyCode::PageUp, _) => {
                 let _ = self.tx.send(Message::ScrollUp(vp.saturating_sub(1)));
-            }
-            KeyCode::End => {
-                let _ = self.tx.send(Message::ScrollToEnd);
-            }
-            KeyCode::Home => {
-                let _ = self.tx.send(Message::ScrollToRow(0));
-            }
-            KeyCode::Down => {
-                let _ = self.tx.send(Message::ScrollDown(1));
-            }
-            KeyCode::Up => {
-                let _ = self.tx.send(Message::ScrollUp(1));
             }
             _ => {}
         }

@@ -33,6 +33,7 @@ pub struct GridState {
     pub manual_widths: HashMap<usize, u16>,
     pub needs_fetch: bool,
     pub viewport_start: i64,
+    pub avail_col_width: u16,
 }
 
 impl GridState {
@@ -64,6 +65,7 @@ impl GridState {
             manual_widths: HashMap::new(),
             needs_fetch: false,
             viewport_start: 0,
+            avail_col_width: 80,
         }
     }
 
@@ -114,6 +116,66 @@ impl GridState {
     fn check_needs_fetch(&mut self) {
         if !self.window.fetch_in_flight && self.window.needs_prefetch(self.focused_row as i64) {
             self.needs_fetch = true;
+        }
+    }
+
+    pub fn move_col_right(&mut self) {
+        if self.focused_col + 1 < self.columns.len() {
+            self.focused_col += 1;
+            self.adjust_h_scroll();
+        }
+    }
+
+    pub fn move_col_left(&mut self) {
+        if self.focused_col > 0 {
+            self.focused_col -= 1;
+            self.adjust_h_scroll();
+        }
+    }
+
+    pub fn move_col_first(&mut self) {
+        self.focused_col = 0;
+        self.h_scroll = 0;
+    }
+
+    pub fn move_col_last(&mut self) {
+        if !self.columns.is_empty() {
+            self.focused_col = self.columns.len() - 1;
+            self.adjust_h_scroll();
+        }
+    }
+
+    fn adjust_h_scroll(&mut self) {
+        if self.focused_col < self.h_scroll {
+            self.h_scroll = self.focused_col;
+            return;
+        }
+        let avail = self.avail_col_width as usize;
+        if avail == 0 {
+            return;
+        }
+        let mut cumul = 0usize;
+        let mut visible_end = self.h_scroll;
+        for col_idx in self.h_scroll..self.col_widths.len() {
+            let w = self.col_widths[col_idx] as usize;
+            if cumul + w > avail {
+                break;
+            }
+            cumul += w;
+            visible_end = col_idx + 1;
+        }
+        while self.focused_col >= visible_end && self.h_scroll < self.focused_col {
+            self.h_scroll += 1;
+            cumul = 0;
+            visible_end = self.h_scroll;
+            for col_idx in self.h_scroll..self.col_widths.len() {
+                let w = self.col_widths[col_idx] as usize;
+                if cumul + w > avail {
+                    break;
+                }
+                cumul += w;
+                visible_end = col_idx + 1;
+            }
         }
     }
 }
@@ -579,6 +641,7 @@ pub fn render_grid(
     let gutter_width = (gutter_digits + 1) as u16;
     // reserve 1 col on the right for the vertical scrollbar
     let data_width = area.width.saturating_sub(gutter_width).saturating_sub(1);
+    state.avail_col_width = data_width;
 
     let mut visible_cols: Vec<usize> = Vec::new();
     let mut cumul = 0u16;
