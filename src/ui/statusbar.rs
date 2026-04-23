@@ -91,6 +91,22 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(pos_str, Style::default().fg(theme.fg_mute)));
     }
 
+    if !app.jump_stack.is_empty() {
+        let current_table = app.grid.as_ref().map_or("—", |g| g.table_name.as_str());
+        let crumb: String = app
+            .jump_stack
+            .iter()
+            .map(|f| f.table.as_str())
+            .chain(std::iter::once(current_table))
+            .collect::<Vec<_>>()
+            .join(" › ");
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(
+            format!("↩ {}", crumb),
+            Style::default().fg(theme.accent),
+        ));
+    }
+
     if !cell_preview.is_empty() {
         spans.push(Span::styled("  ", Style::default()));
         spans.push(Span::styled(

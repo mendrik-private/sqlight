@@ -1,5 +1,6 @@
 pub mod date_picker;
 pub mod datetime_picker;
+pub mod fk_picker;
 pub mod text_editor;
 pub mod value_picker;
 
@@ -9,6 +10,7 @@ use crate::{config::Config, theme::Theme};
 
 pub use date_picker::DatePickerState;
 pub use datetime_picker::DatetimePickerState;
+pub use fk_picker::FkPickerState;
 pub use text_editor::TextEditorState;
 pub use value_picker::ValuePickerState;
 
@@ -18,6 +20,7 @@ pub enum PopupKind {
     ValuePicker(ValuePickerState),
     DatePicker(DatePickerState),
     DatetimePicker(DatetimePickerState),
+    FkPicker(FkPickerState),
 }
 
 pub fn render_popup(
@@ -32,5 +35,6 @@ pub fn render_popup(
         PopupKind::ValuePicker(state) => value_picker::render(frame, area, state, theme, config),
         PopupKind::DatePicker(state) => date_picker::render(frame, area, state, theme),
         PopupKind::DatetimePicker(state) => datetime_picker::render(frame, area, state, theme),
+        PopupKind::FkPicker(state) => fk_picker::render(frame, area, state, theme, config),
     }
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rusqlite::OptionalExtension;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
@@ -7,9 +8,7 @@ use crate::{
     db::{self, schema::Column, schema::Schema, types::SqlValue, DbPool},
     theme::Theme,
     ui::{
-        popup::{
-            DatePickerState, DatetimePickerState, PopupKind, TextEditorState,
-        },
+        popup::{DatePickerState, DatetimePickerState, FkPickerState, PopupKind, TextEditorState},
         sidebar::{SidebarAction, SidebarState},
         toast::{ToastKind, ToastState},
     },
@@ -24,6 +23,13 @@ pub enum AppMode {
 pub enum FocusPane {
     Sidebar,
     Grid,
+}
+
+pub struct JumpFrame {
+    pub table: String,
+    pub row: i64,
+    #[allow(dead_code)]
+    pub col: usize,
 }
 
 pub struct TableTab {
@@ -47,6 +53,7 @@ pub struct App {
     pub popup: Option<PopupKind>,
     pub toast: ToastState,
     pub readonly: bool,
+    pub jump_stack: Vec<JumpFrame>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -104,6 +111,16 @@ pub enum Message {
         count: i64,
         values: Vec<String>,
     },
+    JumpToFk,
+    FkRowsReady {
+        target_table: String,
+        rows: Vec<Vec<SqlValue>>,
+    },
+    JumpBack,
+    JumpToTargetRow {
+        table: String,
+        rowid: i64,
+    },
 }
 
 impl App {
@@ -130,6 +147,7 @@ impl App {
             popup: None,
             toast: ToastState::new(),
             readonly,
+            jump_stack: Vec::new(),
             pool,
             tx,
         }
@@ -395,36 +413,166 @@ impl App {
                     return;
                 }
                 if let Some(ref grid) = self.grid {
-                    let col = grid.columns.get(grid.focused_col).cloned();
-                    let table = grid.table_name.clone();
+                    let col_idx = grid.focused_col;
+                    let col = grid.columns.get(col_idx).cloned();
+                    let table_name = grid.table_name.clone();
+                    let abs_row = grid.viewport_start + grid.focused_row as i64;
                     let cell_value = grid
                         .window
-                        .get_row(grid.viewport_start + grid.focused_row as i64)
-                        .and_then(|r| r.get(grid.focused_col))
+                        .get_row(abs_row)
+                        .and_then(|r| r.get(col_idx))
                         .cloned()
                         .unwrap_or(SqlValue::Null);
-                    let actual_rowid = grid.viewport_start + grid.focused_row as i64 + 1;
+                    let actual_rowid = abs_row + 1;
+                    let is_fk = grid.fk_cols.get(col_idx).copied().unwrap_or(false);
 
                     if let Some(col) = col {
+                        if is_fk {
+                            let table_meta =
+                                self.schema.tables.iter().find(|t| t.name == table_name);
+                            let fk_opt = table_meta.and_then(|tm| {
+                                tm.foreign_keys
+                                    .iter()
+                                    .find(|fk| fk.from_col == col.name)
+                                    .cloned()
+                            });
+                            if let Some(fk) = fk_opt {
+                                let target_meta =
+                                    self.schema.tables.iter().find(|t| t.name == fk.to_table);
+                                let display_cols = target_meta
+                                    .map(|tm| {
+                                        let preferred = ["name", "title", "label", "description"];
+                                        let mut cols: Vec<String> = preferred
+                                            .iter()
+                                            .filter_map(|&p| {
+                                                tm.columns
+                                                    .iter()
+                                                    .find(|c| c.name.to_lowercase() == p)
+                                                    .map(|c| c.name.clone())
+                                            })
+                                            .take(3)
+                                            .collect();
+                                        if cols.is_empty() {
+                                            cols = tm
+                                                .columns
+                                                .iter()
+                                                .filter(|c| {
+                                                    let up = c.col_type.to_uppercase();
+                                                    up.contains("TEXT") || up.contains("CHAR")
+                                                })
+                                                .take(3)
+                                                .map(|c| c.name.clone())
+                                                .collect();
+                                        }
+                                        if cols.is_empty() {
+                                            cols = tm
+                                                .columns
+                                                .iter()
+                                                .take(3)
+                                                .map(|c| c.name.clone())
+                                                .collect();
+                                        }
+                                        cols
+                                    })
+                                    .unwrap_or_default();
+
+                                let picker_state = FkPickerState::new(
+                                    fk.to_table.clone(),
+                                    fk.to_col.clone(),
+                                    display_cols.clone(),
+                                    table_name.clone(),
+                                    col.name.clone(),
+                                    actual_rowid,
+                                );
+                                self.popup = Some(PopupKind::FkPicker(picker_state));
+                                self.mode = AppMode::Edit;
+
+                                let pool = Arc::clone(&self.pool);
+                                let tx = self.tx.clone();
+                                let to_table = fk.to_table.clone();
+                                let to_col = fk.to_col.clone();
+                                let disp_cols = display_cols;
+                                tokio::task::spawn(async move {
+                                    let to_table_c = to_table.clone();
+                                    let result = tokio::task::spawn_blocking(
+                                        move || -> anyhow::Result<Vec<Vec<SqlValue>>> {
+                                            let conn = pool.get()?;
+                                            let col_list = std::iter::once(&to_col)
+                                                .chain(disp_cols.iter())
+                                                .map(|c| format!("\"{}\"", c))
+                                                .collect::<Vec<_>>()
+                                                .join(", ");
+                                            let sql = format!(
+                                                "SELECT {} FROM \"{}\" LIMIT 200",
+                                                col_list, to_table_c
+                                            );
+                                            let mut stmt = conn.prepare(&sql)?;
+                                            let col_count = 1 + disp_cols.len();
+                                            let rows = stmt
+                                                .query_map([], |row| {
+                                                    let mut vals = Vec::new();
+                                                    for i in 0..col_count {
+                                                        let v = match row.get_ref(i)? {
+                                                            rusqlite::types::ValueRef::Null => {
+                                                                SqlValue::Null
+                                                            }
+                                                            rusqlite::types::ValueRef::Integer(
+                                                                n,
+                                                            ) => SqlValue::Integer(n),
+                                                            rusqlite::types::ValueRef::Real(f) => {
+                                                                SqlValue::Real(f)
+                                                            }
+                                                            rusqlite::types::ValueRef::Text(b) => {
+                                                                SqlValue::Text(
+                                                                    String::from_utf8_lossy(b)
+                                                                        .into_owned(),
+                                                                )
+                                                            }
+                                                            rusqlite::types::ValueRef::Blob(b) => {
+                                                                SqlValue::Blob(b.to_vec())
+                                                            }
+                                                        };
+                                                        vals.push(v);
+                                                    }
+                                                    Ok(vals)
+                                                })?
+                                                .collect::<Result<Vec<_>, _>>()?;
+                                            Ok(rows)
+                                        },
+                                    )
+                                    .await;
+                                    if let Ok(Ok(rows)) = result {
+                                        let _ = tx.send(Message::FkRowsReady {
+                                            target_table: to_table,
+                                            rows,
+                                        });
+                                    }
+                                });
+
+                                self.dirty = true;
+                                return;
+                            }
+                        }
+
                         let upper = col.col_type.to_uppercase();
                         let original = cell_value;
                         if upper.contains("DATE") && upper.contains("TIME") {
                             self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
-                                table,
+                                table_name,
                                 actual_rowid,
                                 col.name,
                                 original,
                             )));
                         } else if upper.contains("DATE") {
                             self.popup = Some(PopupKind::DatePicker(DatePickerState::new(
-                                table,
+                                table_name,
                                 actual_rowid,
                                 col.name,
                                 original,
                             )));
                         } else {
                             self.popup = Some(PopupKind::TextEditor(TextEditorState::new(
-                                table,
+                                table_name,
                                 actual_rowid,
                                 col.name.clone(),
                                 col.col_type.clone(),
@@ -470,6 +618,14 @@ impl App {
                         s.rowid,
                         s.as_sql_value(),
                     )),
+                    PopupKind::FkPicker(s) => s.selected_value().cloned().map(|v| {
+                        (
+                            s.source_table.clone(),
+                            s.source_col.clone(),
+                            s.source_rowid,
+                            v,
+                        )
+                    }),
                 });
                 if let Some((table, col, rowid, value)) = write_info {
                     let pool = Arc::clone(&self.pool);
@@ -495,6 +651,110 @@ impl App {
                 self.dirty = true;
             }
             Message::DistinctCountReady { .. } => {}
+            Message::FkRowsReady { target_table, rows } => {
+                if let Some(PopupKind::FkPicker(ref mut state)) = self.popup {
+                    if state.target_table == target_table {
+                        state.rows = rows;
+                        state.loading = false;
+                    }
+                }
+                self.dirty = true;
+            }
+            Message::JumpToFk => {
+                let jump_info = self.grid.as_ref().and_then(|g| {
+                    let col_idx = g.focused_col;
+                    if !g.fk_cols.get(col_idx).copied().unwrap_or(false) {
+                        return None;
+                    }
+                    let table_meta = self.schema.tables.iter().find(|t| t.name == g.table_name)?;
+                    let col = g.columns.get(col_idx)?;
+                    let fk = table_meta
+                        .foreign_keys
+                        .iter()
+                        .find(|fk| fk.from_col == col.name)?;
+                    let abs_row = g.viewport_start + g.focused_row as i64;
+                    let cell_val = g.window.get_row(abs_row)?.get(col_idx)?.clone();
+                    let frame = JumpFrame {
+                        table: g.table_name.clone(),
+                        row: g.focused_row as i64,
+                        col: col_idx,
+                    };
+                    Some((fk.to_table.clone(), fk.to_col.clone(), cell_val, frame))
+                });
+
+                if let Some((to_table, to_col, cell_val, frame)) = jump_info {
+                    self.jump_stack.push(frame);
+                    let _ = self.tx.send(Message::OpenTable(to_table.clone()));
+                    let pool = Arc::clone(&self.pool);
+                    let tx = self.tx.clone();
+                    tokio::task::spawn(async move {
+                        let to_table_c = to_table.clone();
+                        let to_col_c = to_col.clone();
+                        let result =
+                            tokio::task::spawn_blocking(move || -> anyhow::Result<Option<i64>> {
+                                let conn = pool.get()?;
+                                let val = match &cell_val {
+                                    SqlValue::Integer(n) => rusqlite::types::Value::Integer(*n),
+                                    SqlValue::Text(s) => rusqlite::types::Value::Text(s.clone()),
+                                    SqlValue::Real(f) => rusqlite::types::Value::Real(*f),
+                                    _ => rusqlite::types::Value::Null,
+                                };
+                                let rowid: Option<i64> = conn
+                                    .query_row(
+                                        &format!(
+                                            "SELECT rowid FROM \"{}\" WHERE \"{}\" = ?1 LIMIT 1",
+                                            to_table_c, to_col_c
+                                        ),
+                                        rusqlite::params![val],
+                                        |row| row.get(0),
+                                    )
+                                    .optional()?;
+                                Ok(rowid)
+                            })
+                            .await;
+                        if let Ok(Ok(Some(rowid))) = result {
+                            let _ = tx.send(Message::JumpToTargetRow {
+                                table: to_table,
+                                rowid,
+                            });
+                        }
+                    });
+                }
+                self.dirty = true;
+            }
+            Message::JumpToTargetRow { table, rowid } => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    if grid.table_name == table {
+                        grid.scroll_to_row(rowid - 1);
+                        if grid.needs_fetch && !grid.window.fetch_in_flight {
+                            grid.window.fetch_in_flight = true;
+                            grid.needs_fetch = false;
+                            let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                            Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((t, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&t, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::JumpBack => {
+                if let Some(frame) = self.jump_stack.pop() {
+                    let _ = self.tx.send(Message::OpenTable(frame.table.clone()));
+                    let _ = self.tx.send(Message::JumpToTargetRow {
+                        table: frame.table,
+                        rowid: frame.row + 1,
+                    });
+                }
+                self.dirty = true;
+            }
         }
     }
 
@@ -661,6 +921,34 @@ impl App {
                 }
                 _ => {}
             },
+            Some(PopupKind::FkPicker(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::CommitEdit);
+                }
+                KeyCode::Up => {
+                    state.move_up();
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    state.move_down();
+                    self.dirty = true;
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    state.push_filter_char(c);
+                    self.dirty = true;
+                }
+                KeyCode::Backspace => {
+                    state.pop_filter_char();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -668,8 +956,20 @@ impl App {
         use crossterm::event::{KeyCode, KeyModifiers};
         let vp = self.grid.as_ref().map_or(20, |g| g.window.viewport_rows);
         match (key.code, key.modifiers) {
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+            (KeyCode::Down, _) => {
                 let _ = self.tx.send(Message::MoveDown);
+            }
+            (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                let is_fk = self
+                    .grid
+                    .as_ref()
+                    .and_then(|g| g.fk_cols.get(g.focused_col).copied())
+                    .unwrap_or(false);
+                if is_fk {
+                    let _ = self.tx.send(Message::JumpToFk);
+                } else {
+                    let _ = self.tx.send(Message::MoveDown);
+                }
             }
             (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 let _ = self.tx.send(Message::MoveUp);
@@ -703,6 +1003,11 @@ impl App {
             }
             (KeyCode::Esc, _) => {
                 let _ = self.tx.send(Message::ClosePopup);
+            }
+            (KeyCode::Backspace, _) => {
+                if !self.jump_stack.is_empty() {
+                    let _ = self.tx.send(Message::JumpBack);
+                }
             }
             _ => {}
         }
