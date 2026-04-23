@@ -36,7 +36,10 @@ pub enum PopupKind {
 
 pub(crate) fn paint_popup_surface(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::default().style(Style::default().bg(theme.bg_raised)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.bg_raised)),
+        area,
+    );
 }
 
 pub fn render_popup(
