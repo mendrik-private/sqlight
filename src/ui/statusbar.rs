@@ -91,6 +91,27 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(pos_str, Style::default().fg(theme.fg_mute)));
     }
 
+    let sort_str = app
+        .grid
+        .as_ref()
+        .and_then(|g| {
+            g.sort.as_ref().and_then(|s| {
+                let col_name = g.columns.get(s.col_idx).map(|c| c.name.as_str())?;
+                let arrow = if s.direction == crate::grid::SortDir::Asc {
+                    "▲"
+                } else {
+                    "▼"
+                };
+                Some(format!("{} {}", arrow, col_name))
+            })
+        })
+        .unwrap_or_default();
+
+    if !sort_str.is_empty() {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(sort_str, Style::default().fg(theme.accent)));
+    }
+
     if !app.jump_stack.is_empty() {
         let current_table = app.grid.as_ref().map_or("—", |g| g.table_name.as_str());
         let crumb: String = app

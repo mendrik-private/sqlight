@@ -1,3 +1,4 @@
+pub mod alphabet_rail;
 pub mod layout;
 pub mod virtual_scroll;
 
@@ -20,6 +21,18 @@ use crate::{
     theme::Theme,
 };
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone)]
+pub struct SortSpec {
+    pub col_idx: usize,
+    pub direction: SortDir,
+}
+
 #[allow(dead_code)]
 pub struct GridState {
     pub table_name: String,
@@ -34,6 +47,7 @@ pub struct GridState {
     pub needs_fetch: bool,
     pub viewport_start: i64,
     pub avail_col_width: u16,
+    pub sort: Option<SortSpec>,
 }
 
 impl GridState {
@@ -66,6 +80,7 @@ impl GridState {
             needs_fetch: false,
             viewport_start: 0,
             avail_col_width: 80,
+            sort: None,
         }
     }
 
@@ -373,8 +388,23 @@ fn render_header(
 
         buf.set_string(col_x, header_y, " ".repeat(actual_w as usize), header_style);
 
+        let sort_arrow: Option<&str> = if let Some(s) = &state.sort {
+            if s.col_idx == col_idx {
+                Some(if s.direction == SortDir::Asc {
+                    "▲"
+                } else {
+                    "▼"
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let arrow_reserve = if sort_arrow.is_some() { 2usize } else { 0usize };
         let badge_len = UnicodeWidthStr::width(badge);
-        let max_name_w = (actual_w as usize).saturating_sub(badge_len + 2);
+        let max_name_w = (actual_w as usize).saturating_sub(badge_len + 2 + arrow_reserve);
         let name_raw = format!(" {}{}", pfx, col.name);
         let name_truncated = truncate_to_display_width(&name_raw, max_name_w);
         buf.set_string(
@@ -398,6 +428,18 @@ fn render_header(
                     .fg(bcolor)
                     .add_modifier(Modifier::DIM),
             );
+        }
+
+        if let Some(arrow) = sort_arrow {
+            let arrow_x = badge_x.saturating_sub(2);
+            if arrow_x > col_x && arrow_x < area.x + area.width {
+                buf.set_string(
+                    arrow_x,
+                    header_y,
+                    arrow,
+                    Style::default().fg(theme.accent).bg(theme.bg_raised),
+                );
+            }
         }
 
         col_x += cell_w;
@@ -686,4 +728,6 @@ pub fn render_grid(
         render_vertical_scrollbar(buf, area, state, theme);
         render_loading_indicator(buf, area, state, theme);
     }
+    let _ = buf;
+    alphabet_rail::render_rail(frame, area, state, theme);
 }

@@ -5,7 +5,14 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     config::Config,
-    db::{self, schema::Column, schema::Schema, types::SqlValue, DbPool},
+    db::{
+        self,
+        schema::Column,
+        schema::Schema,
+        types::{affinity, ColAffinity, SqlValue},
+        DbPool,
+    },
+    grid::{SortDir, SortSpec},
     theme::Theme,
     ui::{
         popup::{DatePickerState, DatetimePickerState, FkPickerState, PopupKind, TextEditorState},
@@ -121,6 +128,12 @@ pub enum Message {
         table: String,
         rowid: i64,
     },
+    CycleSort,
+    JumpToLetter(char),
+    JumpToSortedOffset {
+        table: String,
+        offset: i64,
+    },
 }
 
 impl App {
@@ -170,15 +183,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                     self.dirty = true;
                 }
                 if self.grid.as_ref().is_some_and(|g| g.window.fetch_in_flight) {
@@ -235,15 +259,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -254,15 +289,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -273,15 +319,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -292,15 +349,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -311,15 +379,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -330,15 +409,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -375,15 +465,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -395,15 +496,26 @@ impl App {
                         grid.window.fetch_in_flight = true;
                         grid.needs_fetch = false;
                         let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
                     } else {
                         None
                     }
                 } else {
                     None
                 };
-                if let Some((table, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, off, lim);
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.dirty = true;
             }
@@ -730,7 +842,18 @@ impl App {
                             grid.window.fetch_in_flight = true;
                             grid.needs_fetch = false;
                             let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                            Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                            let sort = grid.sort.as_ref().and_then(|s| {
+                                grid.columns
+                                    .get(s.col_idx)
+                                    .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                            });
+                            Some((
+                                grid.table_name.clone(),
+                                grid.columns.clone(),
+                                sort,
+                                off,
+                                lim,
+                            ))
                         } else {
                             None
                         }
@@ -740,8 +863,160 @@ impl App {
                 } else {
                     None
                 };
-                if let Some((t, cols, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&t, &cols, off, lim);
+                if let Some((t, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&t, &cols, sort, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::CycleSort => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    let col_idx = grid.focused_col;
+                    grid.sort = match &grid.sort {
+                        None => Some(SortSpec {
+                            col_idx,
+                            direction: SortDir::Asc,
+                        }),
+                        Some(s) if s.col_idx == col_idx => match s.direction {
+                            SortDir::Asc => Some(SortSpec {
+                                col_idx,
+                                direction: SortDir::Desc,
+                            }),
+                            SortDir::Desc => None,
+                        },
+                        Some(_) => Some(SortSpec {
+                            col_idx,
+                            direction: SortDir::Asc,
+                        }),
+                    };
+                    grid.viewport_start = 0;
+                    grid.focused_row = 0;
+                    grid.window.rows.clear();
+                    grid.window.offset = 0;
+                    if !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        let (off, lim) = grid.window.fetch_params(0);
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
+                    } else {
+                        grid.needs_fetch = true;
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::JumpToSortedOffset { table, offset } => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    if grid.table_name == table {
+                        grid.scroll_to_row(offset);
+                        if grid.needs_fetch && !grid.window.fetch_in_flight {
+                            grid.window.fetch_in_flight = true;
+                            grid.needs_fetch = false;
+                            let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                            let sort = grid.sort.as_ref().and_then(|s| {
+                                grid.columns
+                                    .get(s.col_idx)
+                                    .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                            });
+                            Some((
+                                grid.table_name.clone(),
+                                grid.columns.clone(),
+                                sort,
+                                off,
+                                lim,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((t, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&t, &cols, sort, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::JumpToLetter(letter) => {
+                if let Some(ref grid) = self.grid {
+                    let sort = grid.sort.as_ref().cloned();
+                    if let Some(sort) = sort {
+                        if let Some(col) = grid.columns.get(sort.col_idx).cloned() {
+                            let pool = Arc::clone(&self.pool);
+                            let tx = self.tx.clone();
+                            let table = grid.table_name.clone();
+                            let col_name = col.name.clone();
+                            let dir_asc = sort.direction == SortDir::Asc;
+                            let letter_uc = letter.to_uppercase().next().unwrap_or(letter);
+                            let table_inner = table.clone();
+                            tokio::task::spawn(async move {
+                                let result = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+                                    let conn = pool.get()?;
+                                    let offset: i64 = if dir_asc {
+                                        if letter == '#' {
+                                            conn.query_row(
+                                                &format!(
+                                                    "SELECT COUNT(*) FROM \"{}\" WHERE \"{}\" IS NULL",
+                                                    table_inner, col_name
+                                                ),
+                                                [],
+                                                |row| row.get(0),
+                                            )?
+                                        } else {
+                                            conn.query_row(
+                                                &format!(
+                                                    "SELECT COUNT(*) FROM \"{}\" WHERE \"{}\" IS NULL OR \"{}\" < ?1",
+                                                    table_inner, col_name, col_name
+                                                ),
+                                                rusqlite::params![letter_uc.to_string()],
+                                                |row| row.get(0),
+                                            )?
+                                        }
+                                    } else if letter == '#' {
+                                        conn.query_row(
+                                            &format!(
+                                                "SELECT COUNT(*) FROM \"{}\" WHERE \"{}\" IS NOT NULL AND \"{}\" NOT GLOB '[0-9]*'",
+                                                table_inner, col_name, col_name
+                                            ),
+                                            [],
+                                            |row| row.get(0),
+                                        )?
+                                    } else {
+                                        let pattern = format!("{}%", letter_uc);
+                                        conn.query_row(
+                                            &format!(
+                                                "SELECT COUNT(*) FROM \"{}\" WHERE \"{}\" > ?1 AND \"{}\" NOT LIKE ?2",
+                                                table_inner, col_name, col_name
+                                            ),
+                                            rusqlite::params![letter_uc.to_string(), pattern],
+                                            |row| row.get(0),
+                                        )?
+                                    };
+                                    Ok(offset)
+                                })
+                                .await;
+                                if let Ok(Ok(offset)) = result {
+                                    let _ = tx.send(Message::JumpToSortedOffset { table, offset });
+                                }
+                            });
+                        }
+                    }
                 }
                 self.dirty = true;
             }
@@ -1009,6 +1284,37 @@ impl App {
                     let _ = self.tx.send(Message::JumpBack);
                 }
             }
+            (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::CycleSort);
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE)
+                if c.is_alphabetic() && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's') =>
+            {
+                let is_text_sort = self.grid.as_ref().is_some_and(|g| {
+                    if let Some(sort) = &g.sort {
+                        if let Some(col) = g.columns.get(sort.col_idx) {
+                            return matches!(affinity(&col.col_type), ColAffinity::Text);
+                        }
+                    }
+                    false
+                });
+                if is_text_sort {
+                    let _ = self.tx.send(Message::JumpToLetter(c));
+                }
+            }
+            (KeyCode::Char('#'), KeyModifiers::NONE) => {
+                let is_text_sort = self.grid.as_ref().is_some_and(|g| {
+                    if let Some(sort) = &g.sort {
+                        if let Some(col) = g.columns.get(sort.col_idx) {
+                            return matches!(affinity(&col.col_type), ColAffinity::Text);
+                        }
+                    }
+                    false
+                });
+                if is_text_sort {
+                    let _ = self.tx.send(Message::JumpToLetter('#'));
+                }
+            }
             _ => {}
         }
     }
@@ -1096,7 +1402,7 @@ impl App {
                 move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
                     let conn = pool.get()?;
                     let total = db::count_rows(&conn, &table_c)?;
-                    let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50)?;
+                    let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None)?;
                     Ok((rows, total))
                 },
             )
@@ -1113,7 +1419,14 @@ impl App {
         });
     }
 
-    fn spawn_window_fetch(&self, table: &str, columns: &[Column], offset: i64, limit: i64) {
+    fn spawn_window_fetch(
+        &self,
+        table: &str,
+        columns: &[Column],
+        sort: Option<(String, bool)>,
+        offset: i64,
+        limit: i64,
+    ) {
         let pool = Arc::clone(&self.pool);
         let tx = self.tx.clone();
         let table = table.to_string();
@@ -1124,7 +1437,8 @@ impl App {
                 move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
                     let conn = pool.get()?;
                     let total = db::count_rows(&conn, &table_c)?;
-                    let rows = db::fetch_rows(&conn, &table_c, &columns, offset, limit)?;
+                    let order_by = sort.as_ref().map(|(s, b)| (s.as_str(), *b));
+                    let rows = db::fetch_rows(&conn, &table_c, &columns, offset, limit, order_by)?;
                     Ok((rows, total))
                 },
             )

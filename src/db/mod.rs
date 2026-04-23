@@ -158,6 +158,7 @@ pub fn fetch_rows(
     columns: &[Column],
     offset: i64,
     limit: i64,
+    order_by: Option<(&str, bool)>,
 ) -> anyhow::Result<Vec<Vec<types::SqlValue>>> {
     use rusqlite::types::ValueRef;
     use types::SqlValue;
@@ -167,10 +168,15 @@ pub fn fetch_rows(
     }
 
     let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
+    let order_clause = match order_by {
+        Some((col, asc)) => format!(" ORDER BY \"{}\" {}", col, if asc { "ASC" } else { "DESC" }),
+        None => String::new(),
+    };
     let query = format!(
-        "SELECT {} FROM \"{}\" LIMIT ? OFFSET ?",
+        "SELECT {} FROM \"{}\"{} LIMIT ? OFFSET ?",
         col_names.join(", "),
-        table
+        table,
+        order_clause
     );
 
     let mut stmt = conn.prepare(&query)?;
