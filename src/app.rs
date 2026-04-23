@@ -4,7 +4,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     config::Config,
-    db::{schema::Schema, DbPool},
+    db::{self, schema::Column, schema::Schema, types::SqlValue, DbPool},
     theme::Theme,
     ui::sidebar::{SidebarAction, SidebarState},
 };
@@ -30,6 +30,7 @@ pub struct App {
     pub open_tabs: Vec<TableTab>,
     pub active_tab: Option<usize>,
     pub sidebar_visible: bool,
+    pub grid: Option<crate::grid::GridState>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -41,11 +42,21 @@ pub enum Message {
     Resize(u16, u16),
     Tick,
     OpenTable(String),
-    RowCountReady { table: String, count: i64 },
+    RowCountReady {
+        table: String,
+        count: i64,
+    },
     CloseTab(usize),
     ActivateTab(usize),
     NextTab,
     PrevTab,
+    GridDataReady {
+        table: String,
+        columns: Vec<Column>,
+        fk_cols: Vec<bool>,
+        rows: Vec<Vec<SqlValue>>,
+        total_rows: i64,
+    },
 }
 
 impl App {
@@ -66,6 +77,7 @@ impl App {
             open_tabs: Vec::new(),
             active_tab: None,
             sidebar_visible: true,
+            grid: None,
             pool,
             tx,
         }
@@ -87,6 +99,13 @@ impl App {
             Message::ActivateTab(idx) => self.activate_tab(idx),
             Message::NextTab => self.next_tab(),
             Message::PrevTab => self.prev_tab(),
+            Message::GridDataReady {
+                table,
+                columns,
+                fk_cols,
+                rows,
+                total_rows,
+            } => self.on_grid_data_ready(table, columns, fk_cols, rows, total_rows),
         }
     }
 
@@ -154,7 +173,28 @@ impl App {
                 row_count: None,
             });
             self.active_tab = Some(self.open_tabs.len() - 1);
-            self.spawn_row_count(name);
+            self.spawn_row_count(name.clone());
+
+            let cols_and_fks = self
+                .schema
+                .tables
+                .iter()
+                .find(|t| t.name == name)
+                .map(|tm| {
+                    let columns = tm.columns.clone();
+                    let fk_names: Vec<String> = tm
+                        .foreign_keys
+                        .iter()
+                        .map(|fk| fk.from_col.clone())
+                        .collect();
+                    let fk_cols: Vec<bool> =
+                        columns.iter().map(|c| fk_names.contains(&c.name)).collect();
+                    (columns, fk_cols)
+                });
+
+            if let Some((columns, fk_cols)) = cols_and_fks {
+                self.spawn_grid_fetch(name, columns, fk_cols);
+            }
         }
         self.dirty = true;
     }
@@ -179,6 +219,54 @@ impl App {
                 let _ = tx.send(Message::RowCountReady { table, count });
             }
         });
+    }
+
+    fn spawn_grid_fetch(&self, table: String, columns: Vec<Column>, fk_cols: Vec<bool>) {
+        let tx = self.tx.clone();
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn(async move {
+            let table_c = table.clone();
+            let cols_c = columns.clone();
+            let result = tokio::task::spawn_blocking(
+                move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
+                    let conn = pool.get()?;
+                    let total = db::count_rows(&conn, &table_c)?;
+                    let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50)?;
+                    Ok((rows, total))
+                },
+            )
+            .await;
+            if let Ok(Ok((rows, total_rows))) = result {
+                let _ = tx.send(Message::GridDataReady {
+                    table,
+                    columns,
+                    fk_cols,
+                    rows,
+                    total_rows,
+                });
+            }
+        });
+    }
+
+    fn on_grid_data_ready(
+        &mut self,
+        table: String,
+        columns: Vec<Column>,
+        fk_cols: Vec<bool>,
+        rows: Vec<Vec<SqlValue>>,
+        total_rows: i64,
+    ) {
+        let is_active = self
+            .active_tab
+            .and_then(|i| self.open_tabs.get(i))
+            .is_some_and(|t| t.table_name == table);
+        if is_active {
+            let grid_width = 180u16;
+            self.grid = Some(crate::grid::GridState::new(
+                table, columns, fk_cols, rows, total_rows, grid_width,
+            ));
+        }
+        self.dirty = true;
     }
 
     fn update_row_count(&mut self, table: String, count: i64) {

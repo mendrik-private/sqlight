@@ -143,3 +143,53 @@ fn load_all_indexes(conn: &Connection, tables: &[String]) -> anyhow::Result<Vec<
     }
     Ok(indexes)
 }
+
+pub fn count_rows(conn: &Connection, table: &str) -> anyhow::Result<i64> {
+    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM \"{}\"", table), [], |row| {
+        row.get(0)
+    })?;
+    Ok(count)
+}
+
+pub fn fetch_rows(
+    conn: &Connection,
+    table: &str,
+    columns: &[Column],
+    offset: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<Vec<types::SqlValue>>> {
+    use rusqlite::types::ValueRef;
+    use types::SqlValue;
+
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
+    let query = format!(
+        "SELECT {} FROM \"{}\" LIMIT ? OFFSET ?",
+        col_names.join(", "),
+        table
+    );
+
+    let mut stmt = conn.prepare(&query)?;
+    let col_count = columns.len();
+    let rows = stmt.query_map([limit, offset], |row| {
+        let mut values = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            let val = match row.get_ref(i)? {
+                ValueRef::Null => SqlValue::Null,
+                ValueRef::Integer(n) => SqlValue::Integer(n),
+                ValueRef::Real(f) => SqlValue::Real(f),
+                ValueRef::Text(bytes) => {
+                    SqlValue::Text(String::from_utf8_lossy(bytes).into_owned())
+                }
+                ValueRef::Blob(bytes) => SqlValue::Blob(bytes.to_vec()),
+            };
+            values.push(val);
+        }
+        Ok(values)
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().context("fetching rows")
+}

@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod db;
 mod event;
+mod grid;
 mod theme;
 mod ui;
 

@@ -25,7 +25,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let main_area = vertical[1];
 
-    if app.sidebar_visible {
+    let content_area = if app.sidebar_visible {
         let sidebar_width = (main_area.width / 3).clamp(20, 40);
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
@@ -41,6 +41,21 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             &app.theme,
             &app.config,
             focused,
+        );
+        horizontal[1]
+    } else {
+        main_area
+    };
+
+    if let Some(ref grid) = app.grid {
+        crate::grid::render_grid(frame, content_area, grid, &app.theme, &app.config);
+    } else if let Some(active_idx) = app.active_tab {
+        let tab = &app.open_tabs[active_idx];
+        let msg = format!(" Loading {}...", tab.table_name);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(msg)
+                .style(ratatui::style::Style::default().fg(app.theme.fg_dim)),
+            content_area,
         );
     }
 }
