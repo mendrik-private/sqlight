@@ -65,4 +65,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         crate::ui::popup::render_popup(frame, area, popup, &app.theme, &app.config);
     }
     crate::ui::toast::render_toasts(frame, area, &app.toast, &app.theme);
+    if let Some(ref confirm) = app.pending_confirm {
+        crate::ui::toast::render_confirm(frame, area, &confirm.message, &app.theme);
+    }
 }

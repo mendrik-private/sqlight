@@ -92,3 +92,21 @@ pub fn render_toasts(frame: &mut Frame, area: Rect, state: &ToastState, theme: &
         frame.render_widget(para, toast_area);
     }
 }
+
+pub fn render_confirm(frame: &mut Frame, area: Rect, message: &str, theme: &Theme) {
+    let msg = format!("  {}  ", message);
+    let w = (msg.len() as u16).min(60).min(area.width);
+    let x = area.x + area.width.saturating_sub(w);
+    let y = area.y + area.height.saturating_sub(3);
+    let confirm_area = Rect {
+        x,
+        y,
+        width: w,
+        height: 1,
+    };
+    let para = Paragraph::new(Line::from(Span::styled(
+        &msg,
+        Style::default().fg(theme.bg).bg(theme.yellow),
+    )));
+    frame.render_widget(para, confirm_area);
+}

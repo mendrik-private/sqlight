@@ -48,6 +48,33 @@ pub struct TableTab {
     pub row_count: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub enum UndoOp {
+    Update,
+    Insert,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub struct UndoFrame {
+    pub op: UndoOp,
+    pub table: String,
+    pub rowid: i64,
+    pub cols: Vec<(String, SqlValue)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConfirmKind {
+    DeleteRow { table: String, rowid: i64 },
+}
+
+pub struct PendingConfirm {
+    pub message: String,
+    pub kind: ConfirmKind,
+    pub created: std::time::Instant,
+    pub timeout_secs: u64,
+}
+
 pub struct App {
     pub schema: Schema,
     pub sidebar: SidebarState,
@@ -66,6 +93,8 @@ pub struct App {
     pub readonly: bool,
     pub jump_stack: Vec<JumpFrame>,
     pub db_path: String,
+    pub undo_stack: Vec<UndoFrame>,
+    pub pending_confirm: Option<PendingConfirm>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -116,6 +145,9 @@ pub enum Message {
     CommitEdit,
     EditCommitted {
         rowid: i64,
+        table: String,
+        col: String,
+        original: SqlValue,
     },
     EditFailed(String),
     DistinctCountReady {
@@ -142,6 +174,19 @@ pub enum Message {
     OpenFilterPopup,
     ApplyFilter,
     ClearFilters,
+    InsertRow,
+    DeleteRow,
+    ConfirmDelete,
+    CancelConfirm,
+    UndoAction,
+    RowInserted {
+        table: String,
+        rowid: i64,
+    },
+    RowDeleted {
+        table: String,
+        rowid: i64,
+    },
 }
 
 impl App {
@@ -171,6 +216,8 @@ impl App {
             readonly,
             jump_stack: Vec::new(),
             db_path,
+            undo_stack: Vec::new(),
+            pending_confirm: None,
             pool,
             tx,
         }
@@ -216,6 +263,14 @@ impl App {
                     self.dirty = true;
                 }
                 if self.grid.as_ref().is_some_and(|g| g.window.fetch_in_flight) {
+                    self.dirty = true;
+                }
+                let expired = self
+                    .pending_confirm
+                    .as_ref()
+                    .is_some_and(|c| c.created.elapsed().as_secs() >= c.timeout_secs);
+                if expired {
+                    self.pending_confirm = None;
                     self.dirty = true;
                 }
             }
@@ -605,6 +660,7 @@ impl App {
                                     table_name.clone(),
                                     col.name.clone(),
                                     actual_rowid,
+                                    cell_value.clone(),
                                 );
                                 self.popup = Some(PopupKind::FkPicker(picker_state));
                                 self.mode = AppMode::Edit;
@@ -713,12 +769,20 @@ impl App {
                 self.dirty = true;
             }
             Message::CommitEdit => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    self.popup = None;
+                    self.mode = AppMode::Browse;
+                    self.dirty = true;
+                    return;
+                }
                 let write_info = self.popup.as_ref().and_then(|p| match p {
                     PopupKind::TextEditor(s) => Some((
                         s.table.clone(),
                         s.col_name.clone(),
                         s.rowid,
                         s.as_sql_value(),
+                        s.original.clone(),
                     )),
                     PopupKind::ValuePicker(s) => s.selected_value().map(|v| {
                         (
@@ -726,6 +790,7 @@ impl App {
                             s.col_name.clone(),
                             s.rowid,
                             SqlValue::Text(v.to_string()),
+                            s.original.clone(),
                         )
                     }),
                     PopupKind::DatePicker(s) => Some((
@@ -733,12 +798,14 @@ impl App {
                         s.col_name.clone(),
                         s.rowid,
                         s.as_sql_value(),
+                        s.original.clone(),
                     )),
                     PopupKind::DatetimePicker(s) => Some((
                         s.table.clone(),
                         s.col_name.clone(),
                         s.rowid,
                         s.as_sql_value(),
+                        s.original.clone(),
                     )),
                     PopupKind::FkPicker(s) => s.selected_value().cloned().map(|v| {
                         (
@@ -746,17 +813,25 @@ impl App {
                             s.source_col.clone(),
                             s.source_rowid,
                             v,
+                            s.original.clone(),
                         )
                     }),
                     PopupKind::FilterPopup(_) => None,
                 });
-                if let Some((table, col, rowid, value)) = write_info {
+                if let Some((table, col, rowid, value, original)) = write_info {
                     let pool = Arc::clone(&self.pool);
                     let tx = self.tx.clone();
+                    let table_c = table.clone();
+                    let col_c = col.clone();
                     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                         let conn = pool.get()?;
-                        crate::db::write::commit_cell_edit(&conn, &table, &col, rowid, &value)?;
-                        let _ = tx.send(Message::EditCommitted { rowid });
+                        crate::db::write::commit_cell_edit(&conn, &table_c, &col_c, rowid, &value)?;
+                        let _ = tx.send(Message::EditCommitted {
+                            rowid,
+                            table: table_c,
+                            col: col_c,
+                            original,
+                        });
                         Ok(())
                     });
                 }
@@ -764,9 +839,34 @@ impl App {
                 self.mode = AppMode::Browse;
                 self.dirty = true;
             }
-            Message::EditCommitted { rowid: _ } => {
-                self.toast
-                    .push("Cell updated successfully", ToastKind::Success);
+            Message::EditCommitted {
+                rowid: _,
+                table: _,
+                col,
+                original,
+            } => {
+                self.undo_stack.push(UndoFrame {
+                    op: UndoOp::Update,
+                    table: self
+                        .grid
+                        .as_ref()
+                        .map(|g| g.table_name.clone())
+                        .unwrap_or_default(),
+                    rowid: self
+                        .grid
+                        .as_ref()
+                        .map(|g| g.viewport_start + g.focused_row as i64 + 1)
+                        .unwrap_or(0),
+                    cols: vec![(col, original)],
+                });
+                if self.undo_stack.len() > 100 {
+                    self.undo_stack.remove(0);
+                }
+                if let Some(ref mut grid) = self.grid {
+                    grid.window.rows.clear();
+                    grid.needs_fetch = true;
+                }
+                self.toast.push("Cell updated", ToastKind::Success);
                 self.dirty = true;
             }
             Message::EditFailed(err) => {
@@ -1120,6 +1220,254 @@ impl App {
                 self.mode = AppMode::Browse;
                 self.dirty = true;
             }
+            Message::InsertRow => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    return;
+                }
+                let table = self.grid.as_ref().map(|g| g.table_name.clone());
+                if let Some(table) = table {
+                    let pool = Arc::clone(&self.pool);
+                    let tx = self.tx.clone();
+                    let table_c = table.clone();
+                    tokio::task::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            let conn = pool.get()?;
+                            let rowid = crate::db::write::insert_default_row(&conn, &table_c)?;
+                            Ok::<i64, anyhow::Error>(rowid)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(rowid)) => {
+                                let _ = tx.send(Message::RowInserted { table, rowid });
+                            }
+                            Ok(Err(e)) => {
+                                let _ = tx.send(Message::EditFailed(e.to_string()));
+                            }
+                            Err(_) => {}
+                        }
+                    });
+                }
+                self.dirty = true;
+            }
+            Message::RowInserted { table, rowid } => {
+                if let Some(ref mut grid) = self.grid {
+                    if grid.table_name == table {
+                        self.undo_stack.push(UndoFrame {
+                            op: UndoOp::Insert,
+                            table: table.clone(),
+                            rowid,
+                            cols: Vec::new(),
+                        });
+                        if self.undo_stack.len() > 100 {
+                            self.undo_stack.remove(0);
+                        }
+                        grid.window.rows.clear();
+                        grid.window.total_rows += 1;
+                        grid.needs_fetch = true;
+                        if let Some(idx) = self.active_tab {
+                            if let Some(tab) = self.open_tabs.get_mut(idx) {
+                                tab.row_count = tab.row_count.map(|n| n + 1);
+                            }
+                        }
+                    }
+                }
+                self.toast.push("Row inserted", ToastKind::Success);
+                self.dirty = true;
+            }
+            Message::DeleteRow => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    return;
+                }
+                if let Some(ref grid) = self.grid {
+                    let row_num = grid.focused_row + 1;
+                    let table = grid.table_name.clone();
+                    let approx_rowid = grid.viewport_start + grid.focused_row as i64 + 1;
+                    let msg = format!("Delete row #{}? [y/n]", row_num);
+                    self.pending_confirm = Some(PendingConfirm {
+                        message: msg,
+                        kind: ConfirmKind::DeleteRow {
+                            table,
+                            rowid: approx_rowid,
+                        },
+                        created: std::time::Instant::now(),
+                        timeout_secs: 5,
+                    });
+                }
+                self.dirty = true;
+            }
+            Message::ConfirmDelete => {
+                if let Some(confirm) = self.pending_confirm.take() {
+                    match confirm.kind {
+                        ConfirmKind::DeleteRow { table, rowid } => {
+                            let pool = Arc::clone(&self.pool);
+                            let tx_ch = self.tx.clone();
+                            let columns = self
+                                .grid
+                                .as_ref()
+                                .map(|g| g.columns.clone())
+                                .unwrap_or_default();
+                            let table_c = table.clone();
+                            tokio::task::spawn(async move {
+                                drop(columns);
+                                let tx_err = tx_ch.clone();
+                                let result =
+                                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                                        let conn = pool.get()?;
+                                        crate::db::write::delete_row(&conn, &table_c, rowid)?;
+                                        let _ = tx_ch.send(Message::RowDeleted {
+                                            table: table_c,
+                                            rowid,
+                                        });
+                                        Ok(())
+                                    })
+                                    .await;
+                                if let Ok(Err(e)) = result {
+                                    let _ = tx_err.send(Message::EditFailed(e.to_string()));
+                                }
+                            });
+                        }
+                    }
+                }
+                self.dirty = true;
+            }
+            Message::RowDeleted { table, rowid } => {
+                self.undo_stack.push(UndoFrame {
+                    op: UndoOp::Delete,
+                    table: table.clone(),
+                    rowid,
+                    cols: Vec::new(),
+                });
+                if self.undo_stack.len() > 100 {
+                    self.undo_stack.remove(0);
+                }
+                if let Some(ref mut grid) = self.grid {
+                    if grid.table_name == table {
+                        grid.window.rows.clear();
+                        grid.window.total_rows = grid.window.total_rows.saturating_sub(1);
+                        grid.needs_fetch = true;
+                        if let Some(idx) = self.active_tab {
+                            if let Some(tab) = self.open_tabs.get_mut(idx) {
+                                tab.row_count = tab.row_count.map(|n| n.saturating_sub(1));
+                            }
+                        }
+                    }
+                }
+                self.toast.push("Row deleted", ToastKind::Success);
+                self.dirty = true;
+            }
+            Message::CancelConfirm => {
+                self.pending_confirm = None;
+                self.dirty = true;
+            }
+            Message::UndoAction => {
+                if let Some(frame) = self.undo_stack.pop() {
+                    match frame.op {
+                        UndoOp::Update => {
+                            if self.readonly {
+                                self.toast.push("Read-only: cannot undo", ToastKind::Error);
+                                return;
+                            }
+                            let pool = Arc::clone(&self.pool);
+                            let tx = self.tx.clone();
+                            let table = frame.table.clone();
+                            let rowid = frame.rowid;
+                            let cols = frame.cols.clone();
+                            tokio::task::spawn(async move {
+                                let result =
+                                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                                        let conn = pool.get()?;
+                                        for (col_name, value) in &cols {
+                                            crate::db::write::commit_cell_edit(
+                                                &conn, &table, col_name, rowid, value,
+                                            )?;
+                                        }
+                                        Ok(())
+                                    })
+                                    .await;
+                                if let Ok(Err(e)) = result {
+                                    let _ = tx.send(Message::EditFailed(e.to_string()));
+                                }
+                            });
+                            let toast_msg = if frame.cols.len() == 1 {
+                                format!(
+                                    "Undo: reverted col \"{}\" on row {}",
+                                    frame.cols[0].0, frame.rowid
+                                )
+                            } else {
+                                format!(
+                                    "Undo: reverted {} cols on row {}",
+                                    frame.cols.len(),
+                                    frame.rowid
+                                )
+                            };
+                            self.toast.push(toast_msg, ToastKind::Info);
+                        }
+                        UndoOp::Insert => {
+                            let pool = Arc::clone(&self.pool);
+                            let tx = self.tx.clone();
+                            let table = frame.table.clone();
+                            let rowid = frame.rowid;
+                            tokio::task::spawn(async move {
+                                let result = tokio::task::spawn_blocking(move || {
+                                    let conn = pool.get()?;
+                                    crate::db::write::delete_row(&conn, &table, rowid)?;
+                                    Ok::<_, anyhow::Error>(())
+                                })
+                                .await;
+                                if let Ok(Err(e)) = result {
+                                    let _ = tx.send(Message::EditFailed(e.to_string()));
+                                }
+                            });
+                            self.toast.push(
+                                format!("Undo: deleted inserted row {}", frame.rowid),
+                                ToastKind::Info,
+                            );
+                        }
+                        UndoOp::Delete => {
+                            if frame.cols.is_empty() {
+                                self.toast.push(
+                                    "Undo: cannot restore deleted row (no backup)",
+                                    ToastKind::Error,
+                                );
+                                return;
+                            }
+                            let pool = Arc::clone(&self.pool);
+                            let tx = self.tx.clone();
+                            let table = frame.table.clone();
+                            let rowid = frame.rowid;
+                            let cols = frame.cols.clone();
+                            tokio::task::spawn(async move {
+                                let result =
+                                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                                        let conn = pool.get()?;
+                                        crate::db::write::reinsert_row(
+                                            &conn, &table, rowid, &cols,
+                                        )?;
+                                        Ok(())
+                                    })
+                                    .await;
+                                if let Ok(Err(e)) = result {
+                                    let _ = tx.send(Message::EditFailed(e.to_string()));
+                                }
+                            });
+                            self.toast.push(
+                                format!("Undo: restored deleted row {}", rowid),
+                                ToastKind::Info,
+                            );
+                        }
+                    }
+                    if let Some(ref mut grid) = self.grid {
+                        grid.window.rows.clear();
+                        grid.needs_fetch = true;
+                    }
+                    self.dirty = true;
+                } else {
+                    self.toast.push("Nothing to undo", ToastKind::Info);
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -1130,6 +1478,21 @@ impl App {
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        // Handle pending confirmation dialog first
+        if self.pending_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let _ = self.tx.send(Message::ConfirmDelete);
+                    return;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    let _ = self.tx.send(Message::CancelConfirm);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match self.mode {
             AppMode::Edit => {
                 self.handle_edit_key(key);
@@ -1139,6 +1502,9 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                let _ = self.tx.send(Message::UndoAction);
+            }
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
                 self.sidebar_visible = !self.sidebar_visible;
             }
@@ -1439,8 +1805,15 @@ impl App {
             (KeyCode::Char('F'), KeyModifiers::SHIFT) => {
                 let _ = self.tx.send(Message::ClearFilters);
             }
+            (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::InsertRow);
+            }
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::DeleteRow);
+            }
             (KeyCode::Char(c), KeyModifiers::NONE)
-                if c.is_alphabetic() && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's' | 'f') =>
+                if c.is_alphabetic()
+                    && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's' | 'f' | 'i' | 'd') =>
             {
                 let is_text_sort = self.grid.as_ref().is_some_and(|g| {
                     if let Some(sort) = &g.sort {

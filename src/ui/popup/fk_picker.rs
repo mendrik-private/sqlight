@@ -20,6 +20,7 @@ pub struct FkPickerState {
     pub source_col: String,
     pub source_rowid: i64,
     pub loading: bool,
+    pub original: crate::db::types::SqlValue,
 }
 
 impl FkPickerState {
@@ -30,6 +31,7 @@ impl FkPickerState {
         source_table: String,
         source_col: String,
         source_rowid: i64,
+        original: crate::db::types::SqlValue,
     ) -> Self {
         Self {
             target_table,
@@ -42,6 +44,7 @@ impl FkPickerState {
             source_col,
             source_rowid,
             loading: true,
+            original,
         }
     }
 
