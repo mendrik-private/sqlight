@@ -650,38 +650,11 @@ impl App {
                                     self.schema.tables.iter().find(|t| t.name == fk.to_table);
                                 let display_cols = target_meta
                                     .map(|tm| {
-                                        let preferred = ["name", "title", "label", "description"];
-                                        let mut cols: Vec<String> = preferred
+                                        tm.columns
                                             .iter()
-                                            .filter_map(|&p| {
-                                                tm.columns
-                                                    .iter()
-                                                    .find(|c| c.name.to_lowercase() == p)
-                                                    .map(|c| c.name.clone())
-                                            })
-                                            .take(3)
-                                            .collect();
-                                        if cols.is_empty() {
-                                            cols = tm
-                                                .columns
-                                                .iter()
-                                                .filter(|c| {
-                                                    let up = c.col_type.to_uppercase();
-                                                    up.contains("TEXT") || up.contains("CHAR")
-                                                })
-                                                .take(3)
-                                                .map(|c| c.name.clone())
-                                                .collect();
-                                        }
-                                        if cols.is_empty() {
-                                            cols = tm
-                                                .columns
-                                                .iter()
-                                                .take(3)
-                                                .map(|c| c.name.clone())
-                                                .collect();
-                                        }
-                                        cols
+                                            .filter(|c| c.name != fk.to_col)
+                                            .map(|c| c.name.clone())
+                                            .collect::<Vec<_>>()
                                     })
                                     .unwrap_or_default();
 
