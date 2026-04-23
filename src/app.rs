@@ -12,10 +12,14 @@ use crate::{
         types::{affinity, ColAffinity, SqlValue},
         DbPool,
     },
+    filter::predicate::filter_to_sql,
     grid::{SortDir, SortSpec},
     theme::Theme,
     ui::{
-        popup::{DatePickerState, DatetimePickerState, FkPickerState, PopupKind, TextEditorState},
+        popup::{
+            DatePickerState, DatetimePickerState, FilterPopupState, FkPickerState, PopupKind,
+            TextEditorState,
+        },
         sidebar::{SidebarAction, SidebarState},
         toast::{ToastKind, ToastState},
     },
@@ -61,6 +65,7 @@ pub struct App {
     pub toast: ToastState,
     pub readonly: bool,
     pub jump_stack: Vec<JumpFrame>,
+    pub db_path: String,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -134,6 +139,9 @@ pub enum Message {
         table: String,
         offset: i64,
     },
+    OpenFilterPopup,
+    ApplyFilter,
+    ClearFilters,
 }
 
 impl App {
@@ -143,6 +151,7 @@ impl App {
         pool: Arc<DbPool>,
         tx: UnboundedSender<Message>,
         readonly: bool,
+        db_path: String,
     ) -> Self {
         Self {
             schema,
@@ -161,6 +170,7 @@ impl App {
             toast: ToastState::new(),
             readonly,
             jump_stack: Vec::new(),
+            db_path,
             pool,
             tx,
         }
@@ -738,6 +748,7 @@ impl App {
                             v,
                         )
                     }),
+                    PopupKind::FilterPopup(_) => None,
                 });
                 if let Some((table, col, rowid, value)) = write_info {
                     let pool = Arc::clone(&self.pool);
@@ -1030,6 +1041,85 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Message::OpenFilterPopup => {
+                if let Some(ref grid) = self.grid {
+                    let col_idx = grid.focused_col;
+                    if let Some(col) = grid.columns.get(col_idx) {
+                        let col_name = col.name.clone();
+                        let col_filter = grid
+                            .filter
+                            .columns
+                            .get(&col_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        self.popup = Some(PopupKind::FilterPopup(FilterPopupState::new(
+                            col_name, col_filter,
+                        )));
+                        self.mode = AppMode::Edit;
+                    }
+                }
+                self.dirty = true;
+            }
+            Message::ApplyFilter => {
+                if let Some(PopupKind::FilterPopup(state)) = self.popup.take() {
+                    if let Some(ref mut grid) = self.grid {
+                        grid.filter
+                            .columns
+                            .insert(state.col_name.clone(), state.col_filter);
+                        grid.viewport_start = 0;
+                        grid.focused_row = 0;
+                        grid.window.rows.clear();
+                        grid.window.offset = 0;
+                        let table = grid.table_name.clone();
+                        let cols = grid.columns.clone();
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        let (off, lim) = grid.window.fetch_params(0);
+                        grid.window.fetch_in_flight = true;
+                        let filter = grid.filter.clone();
+                        let db_path = self.db_path.clone();
+                        let _ = crate::filter::save_filter(&filter, &db_path, &table);
+                        self.spawn_window_fetch_with_filter(&table, &cols, sort, off, lim, filter);
+                    }
+                    self.mode = AppMode::Browse;
+                }
+                self.dirty = true;
+            }
+            Message::ClearFilters => {
+                if let Some(ref mut grid) = self.grid {
+                    grid.filter = crate::filter::FilterSet::default();
+                    grid.viewport_start = 0;
+                    grid.focused_row = 0;
+                    grid.window.rows.clear();
+                    grid.window.offset = 0;
+                    let table = grid.table_name.clone();
+                    let cols = grid.columns.clone();
+                    let sort = grid.sort.as_ref().and_then(|s| {
+                        grid.columns
+                            .get(s.col_idx)
+                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                    });
+                    let (off, lim) = grid.window.fetch_params(0);
+                    grid.window.fetch_in_flight = true;
+                    let db_path = self.db_path.clone();
+                    let empty_filter = crate::filter::FilterSet::default();
+                    let _ = crate::filter::save_filter(&empty_filter, &db_path, &table);
+                    self.spawn_window_fetch_with_filter(
+                        &table,
+                        &cols,
+                        sort,
+                        off,
+                        lim,
+                        empty_filter,
+                    );
+                }
+                self.popup = None;
+                self.mode = AppMode::Browse;
+                self.dirty = true;
+            }
         }
     }
 
@@ -1224,6 +1314,62 @@ impl App {
                 }
                 _ => {}
             },
+            Some(PopupKind::FilterPopup(state)) => match key.code {
+                KeyCode::Esc => {
+                    self.popup = None;
+                    self.mode = AppMode::Browse;
+                    self.dirty = true;
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::ApplyFilter);
+                }
+                KeyCode::Char('n') if key.modifiers == KeyModifiers::NONE => {
+                    state.editing = true;
+                    state.edit_value.clear();
+                    self.dirty = true;
+                }
+                KeyCode::Delete => {
+                    if state.selected_rule < state.col_filter.rules.len() {
+                        state.col_filter.rules.remove(state.selected_rule);
+                        if state.selected_rule > 0
+                            && state.selected_rule >= state.col_filter.rules.len()
+                        {
+                            state.selected_rule -= 1;
+                        }
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Up => {
+                    state.selected_rule = state.selected_rule.saturating_sub(1);
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    if !state.col_filter.rules.is_empty() {
+                        state.selected_rule =
+                            (state.selected_rule + 1).min(state.col_filter.rules.len() - 1);
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(rule) = state.col_filter.rules.get_mut(state.selected_rule) {
+                        rule.enabled = !rule.enabled;
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Char(c)
+                    if state.editing
+                        && (key.modifiers == KeyModifiers::NONE
+                            || key.modifiers == KeyModifiers::SHIFT) =>
+                {
+                    state.edit_value.push(c);
+                    self.dirty = true;
+                }
+                KeyCode::Backspace if state.editing => {
+                    state.edit_value.pop();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -1287,8 +1433,14 @@ impl App {
             (KeyCode::Char('s'), KeyModifiers::NONE) => {
                 let _ = self.tx.send(Message::CycleSort);
             }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::OpenFilterPopup);
+            }
+            (KeyCode::Char('F'), KeyModifiers::SHIFT) => {
+                let _ = self.tx.send(Message::ClearFilters);
+            }
             (KeyCode::Char(c), KeyModifiers::NONE)
-                if c.is_alphabetic() && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's') =>
+                if c.is_alphabetic() && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's' | 'f') =>
             {
                 let is_text_sort = self.grid.as_ref().is_some_and(|g| {
                     if let Some(sort) = &g.sort {
@@ -1401,8 +1553,8 @@ impl App {
             let result = tokio::task::spawn_blocking(
                 move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
                     let conn = pool.get()?;
-                    let total = db::count_rows(&conn, &table_c)?;
-                    let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None)?;
+                    let total = db::count_rows(&conn, &table_c, "", &[])?;
+                    let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None, "", &[])?;
                     Ok((rows, total))
                 },
             )
@@ -1427,6 +1579,23 @@ impl App {
         offset: i64,
         limit: i64,
     ) {
+        let filter = self
+            .grid
+            .as_ref()
+            .map(|g| g.filter.clone())
+            .unwrap_or_default();
+        self.spawn_window_fetch_with_filter(table, columns, sort, offset, limit, filter);
+    }
+
+    fn spawn_window_fetch_with_filter(
+        &self,
+        table: &str,
+        columns: &[Column],
+        sort: Option<(String, bool)>,
+        offset: i64,
+        limit: i64,
+        filter: crate::filter::FilterSet,
+    ) {
         let pool = Arc::clone(&self.pool);
         let tx = self.tx.clone();
         let table = table.to_string();
@@ -1436,9 +1605,19 @@ impl App {
             let result = tokio::task::spawn_blocking(
                 move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
                     let conn = pool.get()?;
-                    let total = db::count_rows(&conn, &table_c)?;
+                    let (where_clause, where_params) = filter_to_sql(&filter);
+                    let total = db::count_rows(&conn, &table_c, &where_clause, &where_params)?;
                     let order_by = sort.as_ref().map(|(s, b)| (s.as_str(), *b));
-                    let rows = db::fetch_rows(&conn, &table_c, &columns, offset, limit, order_by)?;
+                    let rows = db::fetch_rows(
+                        &conn,
+                        &table_c,
+                        &columns,
+                        offset,
+                        limit,
+                        order_by,
+                        &where_clause,
+                        &where_params,
+                    )?;
                     Ok((rows, total))
                 },
             )
@@ -1468,9 +1647,31 @@ impl App {
             .is_some_and(|t| t.table_name == table);
         if is_active {
             let grid_width = 180u16;
-            self.grid = Some(crate::grid::GridState::new(
-                table, columns, fk_cols, rows, total_rows, grid_width,
-            ));
+            let mut grid = crate::grid::GridState::new(
+                table.clone(),
+                columns,
+                fk_cols,
+                rows,
+                total_rows,
+                grid_width,
+            );
+            if let Ok(saved_filter) = crate::filter::load_filter(&self.db_path, &table) {
+                if !saved_filter.is_empty() {
+                    grid.filter = saved_filter.clone();
+                    let cols = grid.columns.clone();
+                    let (off, lim) = grid.window.fetch_params(0);
+                    grid.window.fetch_in_flight = true;
+                    self.spawn_window_fetch_with_filter(
+                        &table,
+                        &cols,
+                        None,
+                        off,
+                        lim,
+                        saved_filter,
+                    );
+                }
+            }
+            self.grid = Some(grid);
         }
         self.dirty = true;
     }

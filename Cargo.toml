@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-rusqlite = { version = "0.32", features = ["bundled", "chrono", "blob"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "blob", "functions"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 chrono = { version = "0.4", features = ["serde"] }

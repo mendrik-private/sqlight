@@ -48,6 +48,7 @@ pub struct GridState {
     pub viewport_start: i64,
     pub avail_col_width: u16,
     pub sort: Option<SortSpec>,
+    pub filter: crate::filter::FilterSet,
 }
 
 impl GridState {
@@ -81,6 +82,7 @@ impl GridState {
             viewport_start: 0,
             avail_col_width: 80,
             sort: None,
+            filter: crate::filter::FilterSet::default(),
         }
     }
 
@@ -402,9 +404,17 @@ fn render_header(
             None
         };
 
+        let filter_active = state
+            .filter
+            .columns
+            .get(&col.name)
+            .is_some_and(|cf| cf.rules.iter().any(|r| r.enabled));
+
         let arrow_reserve = if sort_arrow.is_some() { 2usize } else { 0usize };
+        let filter_reserve = if filter_active { 2usize } else { 0usize };
         let badge_len = UnicodeWidthStr::width(badge);
-        let max_name_w = (actual_w as usize).saturating_sub(badge_len + 2 + arrow_reserve);
+        let max_name_w =
+            (actual_w as usize).saturating_sub(badge_len + 2 + arrow_reserve + filter_reserve);
         let name_raw = format!(" {}{}", pfx, col.name);
         let name_truncated = truncate_to_display_width(&name_raw, max_name_w);
         buf.set_string(
@@ -437,6 +447,18 @@ fn render_header(
                     arrow_x,
                     header_y,
                     arrow,
+                    Style::default().fg(theme.accent).bg(theme.bg_raised),
+                );
+            }
+        }
+
+        if filter_active {
+            let filter_x = badge_x.saturating_sub((arrow_reserve + 2) as u16);
+            if filter_x > col_x && filter_x < area.x + area.width {
+                buf.set_string(
+                    filter_x,
+                    header_y,
+                    "F",
                     Style::default().fg(theme.accent).bg(theme.bg_raised),
                 );
             }

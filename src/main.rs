@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod db;
 mod event;
+mod filter;
 mod grid;
 mod theme;
 mod ui;
@@ -89,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let mut app = App::new(schema, config, pool, tx, args.readonly);
+    let mut app = App::new(schema, config, pool, tx, args.readonly, args.path.clone());
 
     run_event_loop(&mut terminal, &mut app, &mut rx).await?;
 

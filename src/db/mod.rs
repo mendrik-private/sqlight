@@ -5,16 +5,36 @@ pub mod write;
 
 use anyhow::Context;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 
 use schema::{Column, ForeignKey, IndexMeta, Schema, TableMeta, ViewMeta};
 
 pub type DbPool = r2d2::Pool<SqliteConnectionManager>;
 
+fn register_functions(conn: &Connection) -> rusqlite::Result<()> {
+    conn.create_scalar_function(
+        "regexp",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let pattern: String = ctx.get(0)?;
+            let text: String = ctx.get(1)?;
+            let re = regex::Regex::new(&pattern)
+                .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+            Ok(re.is_match(&text))
+        },
+    )?;
+    Ok(())
+}
+
 pub fn open_pool(path: &str, readonly: bool) -> anyhow::Result<DbPool> {
     let manager = if path == ":memory:" {
-        SqliteConnectionManager::memory()
-            .with_init(|conn| conn.execute_batch("PRAGMA foreign_keys = ON;"))
+        SqliteConnectionManager::memory().with_init(|conn| {
+            conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            register_functions(conn)?;
+            Ok(())
+        })
     } else {
         let flags = if readonly {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI
@@ -25,7 +45,11 @@ pub fn open_pool(path: &str, readonly: bool) -> anyhow::Result<DbPool> {
         };
         SqliteConnectionManager::file(path)
             .with_flags(flags)
-            .with_init(|conn| conn.execute_batch("PRAGMA foreign_keys = ON;"))
+            .with_init(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+                register_functions(conn)?;
+                Ok(())
+            })
     };
     Ok(r2d2::Pool::new(manager)?)
 }
@@ -145,13 +169,27 @@ fn load_all_indexes(conn: &Connection, tables: &[String]) -> anyhow::Result<Vec<
     Ok(indexes)
 }
 
-pub fn count_rows(conn: &Connection, table: &str) -> anyhow::Result<i64> {
-    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM \"{}\"", table), [], |row| {
-        row.get(0)
-    })?;
+pub fn count_rows(
+    conn: &Connection,
+    table: &str,
+    where_clause: &str,
+    where_params: &[rusqlite::types::Value],
+) -> anyhow::Result<i64> {
+    let where_part = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clause)
+    };
+    let sql = format!("SELECT COUNT(*) FROM \"{}\"{}", table, where_part);
+    let count: i64 = conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(where_params.iter()),
+        |row| row.get(0),
+    )?;
     Ok(count)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_rows(
     conn: &Connection,
     table: &str,
@@ -159,6 +197,8 @@ pub fn fetch_rows(
     offset: i64,
     limit: i64,
     order_by: Option<(&str, bool)>,
+    where_clause: &str,
+    where_params: &[rusqlite::types::Value],
 ) -> anyhow::Result<Vec<Vec<types::SqlValue>>> {
     use rusqlite::types::ValueRef;
     use types::SqlValue;
@@ -172,16 +212,24 @@ pub fn fetch_rows(
         Some((col, asc)) => format!(" ORDER BY \"{}\" {}", col, if asc { "ASC" } else { "DESC" }),
         None => String::new(),
     };
+    let where_part = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clause)
+    };
     let query = format!(
-        "SELECT {} FROM \"{}\"{} LIMIT ? OFFSET ?",
+        "SELECT {} FROM \"{}\"{}{}  LIMIT {} OFFSET {}",
         col_names.join(", "),
         table,
-        order_clause
+        where_part,
+        order_clause,
+        limit,
+        offset
     );
 
     let mut stmt = conn.prepare(&query)?;
     let col_count = columns.len();
-    let rows = stmt.query_map([limit, offset], |row| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(where_params.iter()), |row| {
         let mut values = Vec::with_capacity(col_count);
         for i in 0..col_count {
             let val = match row.get_ref(i)? {
