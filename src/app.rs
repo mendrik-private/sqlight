@@ -22,7 +22,6 @@ use crate::{
             FkPickerState, PaletteCommand, PopupKind, TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
-        tabbar::TabMouseAction,
         toast::{ToastKind, ToastState},
     },
 };
@@ -1723,7 +1722,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use crossterm::event::{MouseButton, MouseEventKind};
 
         if self.popup.is_some() || matches!(self.mode, AppMode::Edit) {
             return;
@@ -1738,16 +1737,6 @@ impl App {
         let x = mouse.column;
         let y = mouse.row;
 
-        if let Some(action) =
-            crate::ui::tabbar::hit_test(self.tabbar_area, self, x, y, middle_click)
-        {
-            match action {
-                TabMouseAction::Activate(idx) => self.activate_tab(idx),
-                TabMouseAction::Close(idx) => self.close_tab(idx),
-            }
-            return;
-        }
-
         if let Some(area) = self.sidebar_area {
             if self.sidebar_visible
                 && x >= area.x
@@ -1759,13 +1748,7 @@ impl App {
                 if left_click {
                     if let Some(action) = self.sidebar.click_at(area, &self.schema, x, y) {
                         match action {
-                            SidebarAction::OpenTable(name) => {
-                                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                                    self.open_table_in_new_tab(name);
-                                } else {
-                                    self.open_table(name);
-                                }
-                            }
+                            SidebarAction::OpenTable(name) => self.open_table(name),
                             SidebarAction::Toggle => {}
                         }
                     }
@@ -1846,26 +1829,11 @@ impl App {
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
                 self.sidebar_visible = !self.sidebar_visible;
             }
-            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-                if let Some(idx) = self.active_tab {
-                    let _ = self.tx.send(Message::CloseTab(idx));
-                }
-            }
-            (KeyCode::Char(c), KeyModifiers::CONTROL) if c.is_ascii_digit() && c != '0' => {
-                let idx = (c as usize) - ('1' as usize);
-                let _ = self.tx.send(Message::ActivateTab(idx));
-            }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 self.focus = match self.focus {
                     FocusPane::Sidebar => FocusPane::Grid,
                     FocusPane::Grid => FocusPane::Sidebar,
                 };
-            }
-            (KeyCode::Tab, KeyModifiers::CONTROL) => {
-                let _ = self.tx.send(Message::NextTab);
-            }
-            (KeyCode::BackTab, _) => {
-                let _ = self.tx.send(Message::PrevTab);
             }
             _ => match self.focus {
                 FocusPane::Sidebar => self.handle_sidebar_key(key),
@@ -2238,10 +2206,6 @@ impl App {
 
     fn open_table(&mut self, name: String) {
         self.open_table_with_mode(name, false);
-    }
-
-    fn open_table_in_new_tab(&mut self, name: String) {
-        self.open_table_with_mode(name, true);
     }
 
     fn open_table_with_mode(&mut self, name: String, new_tab: bool) {

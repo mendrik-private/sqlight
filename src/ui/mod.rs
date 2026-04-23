@@ -1,7 +1,6 @@
 pub mod popup;
 pub mod sidebar;
 pub mod statusbar;
-pub mod tabbar;
 pub mod toast;
 
 use crate::app::{App, FocusPane};
@@ -22,18 +21,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(area);
 
-    app.tabbar_area = vertical[0];
-    tabbar::render_tabbar(frame, vertical[0], app);
-    statusbar::render_statusbar(frame, vertical[2], app);
+    statusbar::render_statusbar(frame, vertical[1], app);
 
-    let main_area = vertical[1];
+    let main_area = vertical[0];
 
     let content_area = if app.sidebar_visible {
         let sidebar_width = (main_area.width / 3).clamp(20, 40);
@@ -99,11 +92,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .title(Span::styled(
                 format!("▌ TABLE · {}", grid.table_name),
                 Style::default()
-                    .fg(if matches!(app.focus, FocusPane::Grid) {
-                        app.theme.accent
-                    } else {
-                        app.theme.fg_mute
-                    })
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(meta, Style::default().fg(app.theme.fg_mute)));
@@ -119,7 +108,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .border_style(Style::default().fg(app.theme.line))
             .title(Span::styled(
                 format!("▌ TABLE · {}", tab.table_name),
-                Style::default().fg(app.theme.fg_mute),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(content_area);
         app.grid_outer_area = Some(content_area);
@@ -137,7 +128,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .border_style(Style::default().fg(app.theme.line))
             .title(Span::styled(
                 "▌ TABLE",
-                Style::default().fg(app.theme.fg_mute),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(content_area);
         app.grid_outer_area = Some(content_area);

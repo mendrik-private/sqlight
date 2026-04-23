@@ -130,7 +130,7 @@ impl SidebarState {
             return None;
         }
 
-        let idx = (y - inner.y) as usize;
+        let idx = self.list_state.offset() + (y - inner.y) as usize;
         if idx >= self.visible_count(schema) {
             return None;
         }
