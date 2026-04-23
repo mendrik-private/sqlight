@@ -1774,7 +1774,6 @@ impl App {
                 if cycle_sort {
                     let _ = self.tx.send(Message::CycleSort);
                 }
-                return;
             }
         }
     }
