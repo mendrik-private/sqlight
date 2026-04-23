@@ -5,6 +5,8 @@ mod event;
 mod theme;
 mod ui;
 
+use std::sync::Arc;
+
 use anyhow::Context;
 use clap::Parser;
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -72,19 +74,23 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::load().unwrap_or_default();
 
-    let pool = db::open_pool(&args.path, args.readonly)
-        .with_context(|| format!("Failed to open database '{}'", args.path))?;
+    let pool = Arc::new(
+        db::open_pool(&args.path, args.readonly)
+            .with_context(|| format!("Failed to open database '{}'", args.path))?,
+    );
 
     let conn = pool.get().context("Failed to get DB connection")?;
     let schema = db::load_schema(&conn).context("Failed to load schema")?;
     drop(conn);
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+
     let _guard = TerminalGuard::new()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let mut app = App::new(schema, config);
+    let mut app = App::new(schema, config, pool, tx);
 
-    run_event_loop(&mut terminal, &mut app).await?;
+    run_event_loop(&mut terminal, &mut app, &mut rx).await?;
 
     Ok(())
 }
@@ -92,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Message>,
 ) -> anyhow::Result<()> {
     use futures::StreamExt;
 
@@ -122,6 +129,9 @@ async fn run_event_loop(
                     }
                     _ => break,
                 }
+            }
+            Some(msg) = rx.recv() => {
+                app.update(msg);
             }
         }
     }
