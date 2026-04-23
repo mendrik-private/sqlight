@@ -18,6 +18,7 @@ pub struct TextEditorState {
     pub current: String,
     pub cursor_pos: usize,
     pub is_multiline: bool,
+    pub json_mode: bool,
     pub valid: bool,
     pub readonly: bool,
 }
@@ -31,7 +32,7 @@ impl TextEditorState {
         original: SqlValue,
         readonly: bool,
     ) -> Self {
-        let current = match &original {
+        let mut current = match &original {
             SqlValue::Null => String::new(),
             SqlValue::Integer(n) => n.to_string(),
             SqlValue::Real(f) => f.to_string(),
@@ -39,9 +40,18 @@ impl TextEditorState {
             SqlValue::Blob(_) => String::new(),
         };
         let upper = col_type.to_uppercase();
-        let is_multiline = upper.contains("TEXT") || upper.contains("CLOB");
+        let mut json_mode = false;
+        if let SqlValue::Text(text) = &original {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
+                if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+                    current = pretty;
+                    json_mode = true;
+                }
+            }
+        }
+        let is_multiline = json_mode || upper.contains("TEXT") || upper.contains("CLOB");
         let cursor_pos = current.chars().count();
-        Self {
+        let mut state = Self {
             table,
             rowid,
             col_name,
@@ -50,9 +60,12 @@ impl TextEditorState {
             current,
             cursor_pos,
             is_multiline,
+            json_mode,
             valid: true,
             readonly,
-        }
+        };
+        state.validate();
+        state
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -106,6 +119,9 @@ impl TextEditorState {
             self.valid = self.current.is_empty() || self.current.parse::<i64>().is_ok();
         } else if upper.contains("REAL") || upper.contains("FLOAT") || upper.contains("DOUBLE") {
             self.valid = self.current.is_empty() || self.current.parse::<f64>().is_ok();
+        } else if self.json_mode {
+            self.valid = self.current.trim().is_empty()
+                || serde_json::from_str::<serde_json::Value>(&self.current).is_ok();
         } else {
             self.valid = true;
         }
@@ -157,7 +173,11 @@ pub fn render(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
-        .title(format!(" Edit: {} ", state.col_name))
+        .title(format!(
+            " {}: {} ",
+            if state.json_mode { "JSON" } else { "Edit" },
+            state.col_name
+        ))
         .style(Style::default().bg(theme.bg_raised));
 
     let inner = block.inner(popup_area);
@@ -171,7 +191,8 @@ pub fn render(
     let hint_style = Style::default().fg(theme.fg_faint);
 
     let upper = state.col_type.to_uppercase();
-    let show_validity = upper.contains("INT")
+    let show_validity = state.json_mode
+        || upper.contains("INT")
         || upper.contains("REAL")
         || upper.contains("FLOAT")
         || upper.contains("DOUBLE");
@@ -188,7 +209,11 @@ pub fn render(
         )));
     }
     lines.push(Line::from(Span::styled(
-        " Enter commit · Esc cancel",
+        if state.is_multiline {
+            " Enter newline · Ctrl-Enter commit · Esc cancel"
+        } else {
+            " Enter commit · Esc cancel"
+        },
         hint_style,
     )));
     if show_validity {

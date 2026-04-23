@@ -101,6 +101,7 @@ pub struct App {
     pub sidebar_area: Option<Rect>,
     pub grid_outer_area: Option<Rect>,
     pub grid_inner_area: Option<Rect>,
+    pub pending_jump_target: Option<(String, i64)>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -238,6 +239,7 @@ impl App {
             sidebar_area: None,
             grid_outer_area: None,
             grid_inner_area: None,
+            pending_jump_target: None,
             pool,
             tx,
         }
@@ -309,7 +311,15 @@ impl App {
                 fk_cols,
                 rows,
                 total_rows,
-            } => self.on_grid_data_ready(table, columns, fk_cols, rows, total_rows),
+            } => {
+                self.on_grid_data_ready(table.clone(), columns, fk_cols, rows, total_rows);
+                if let Some((pending_table, rowid)) = self.pending_jump_target.clone() {
+                    if pending_table == table {
+                        self.pending_jump_target = None;
+                        self.jump_to_rowid(table, rowid);
+                    }
+                }
+            }
             Message::WindowReady {
                 table,
                 offset,
@@ -775,14 +785,55 @@ impl App {
                                 original,
                             )));
                         } else {
-                            self.popup = Some(PopupKind::TextEditor(TextEditorState::new(
-                                table_name,
-                                actual_rowid,
-                                col.name.clone(),
-                                col.col_type.clone(),
-                                original,
-                                self.readonly,
-                            )));
+                            let distinct_values = match self.pool.get() {
+                                Ok(conn) => match db::load_distinct_values(
+                                    &conn,
+                                    &table_name,
+                                    &col.name,
+                                    21,
+                                ) {
+                                    Ok(values) => Some(values),
+                                    Err(err) => {
+                                        self.toast.push(
+                                            format!("Distinct lookup failed: {}", err),
+                                            ToastKind::Error,
+                                        );
+                                        None
+                                    }
+                                },
+                                Err(err) => {
+                                    self.toast.push(
+                                        format!("DB connection failed: {}", err),
+                                        ToastKind::Error,
+                                    );
+                                    None
+                                }
+                            };
+
+                            if let Some(values) = distinct_values.filter(|values| {
+                                (2..=20).contains(&values.len())
+                                    && values.iter().all(|v| v.chars().count() <= 40)
+                            }) {
+                                self.popup = Some(PopupKind::ValuePicker(
+                                    crate::ui::popup::ValuePickerState::new(
+                                        table_name,
+                                        actual_rowid,
+                                        col.name.clone(),
+                                        col.col_type.clone(),
+                                        values,
+                                        original,
+                                    ),
+                                ));
+                            } else {
+                                self.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+                                    table_name,
+                                    actual_rowid,
+                                    col.name.clone(),
+                                    col.col_type.clone(),
+                                    original,
+                                    self.readonly,
+                                )));
+                            }
                         }
                         self.mode = AppMode::Edit;
                     }
@@ -810,12 +861,12 @@ impl App {
                         s.as_sql_value(),
                         s.original.clone(),
                     )),
-                    PopupKind::ValuePicker(s) => s.selected_value().map(|v| {
+                    PopupKind::ValuePicker(s) => s.selected_sql_value().map(|v| {
                         (
                             s.table.clone(),
                             s.col_name.clone(),
                             s.rowid,
-                            SqlValue::Text(v.to_string()),
+                            v,
                             s.original.clone(),
                         )
                     }),
@@ -972,40 +1023,7 @@ impl App {
                 }
                 self.dirty = true;
             }
-            Message::JumpToTargetRow { table, rowid } => {
-                let maybe_fetch = if let Some(ref mut grid) = self.grid {
-                    if grid.table_name == table {
-                        grid.scroll_to_row(rowid - 1);
-                        if grid.needs_fetch && !grid.window.fetch_in_flight {
-                            grid.window.fetch_in_flight = true;
-                            grid.needs_fetch = false;
-                            let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                            let sort = grid.sort.as_ref().and_then(|s| {
-                                grid.columns
-                                    .get(s.col_idx)
-                                    .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
-                            });
-                            Some((
-                                grid.table_name.clone(),
-                                grid.columns.clone(),
-                                sort,
-                                off,
-                                lim,
-                            ))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((t, cols, sort, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&t, &cols, sort, off, lim);
-                }
-                self.dirty = true;
-            }
+            Message::JumpToTargetRow { table, rowid } => self.jump_to_rowid(table, rowid),
             Message::CycleSort => {
                 let maybe_fetch = if let Some(ref mut grid) = self.grid {
                     let col_idx = grid.focused_col;
@@ -1705,7 +1723,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::{MouseButton, MouseEventKind};
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
         if self.popup.is_some() || matches!(self.mode, AppMode::Edit) {
             return;
@@ -1741,7 +1759,13 @@ impl App {
                 if left_click {
                     if let Some(action) = self.sidebar.click_at(area, &self.schema, x, y) {
                         match action {
-                            SidebarAction::OpenTable(name) => self.open_table(name),
+                            SidebarAction::OpenTable(name) => {
+                                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                                    self.open_table_in_new_tab(name);
+                                } else {
+                                    self.open_table(name);
+                                }
+                            }
                             SidebarAction::Toggle => {}
                         }
                     }
@@ -1861,7 +1885,17 @@ impl App {
                     let _ = self.tx.send(Message::ClosePopup);
                 }
                 KeyCode::Enter => {
-                    let _ = self.tx.send(Message::CommitEdit);
+                    if state.is_multiline && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        state.insert_char('\n');
+                        self.dirty = true;
+                    } else {
+                        let _ = self.tx.send(Message::CommitEdit);
+                    }
+                }
+                KeyCode::Tab if state.is_multiline => {
+                    state.insert_char(' ');
+                    state.insert_char(' ');
+                    self.dirty = true;
                 }
                 KeyCode::Char(c)
                     if key.modifiers == KeyModifiers::NONE
@@ -2203,38 +2237,58 @@ impl App {
     }
 
     fn open_table(&mut self, name: String) {
+        self.open_table_with_mode(name, false);
+    }
+
+    fn open_table_in_new_tab(&mut self, name: String) {
+        self.open_table_with_mode(name, true);
+    }
+
+    fn open_table_with_mode(&mut self, name: String, new_tab: bool) {
         if let Some(idx) = self.open_tabs.iter().position(|t| t.table_name == name) {
             self.active_tab = Some(idx);
+            self.request_table_view(&name);
         } else {
-            self.open_tabs.push(TableTab {
-                table_name: name.clone(),
-                row_count: None,
-            });
-            self.active_tab = Some(self.open_tabs.len() - 1);
-            self.spawn_row_count(name.clone());
-
-            let cols_and_fks = self
-                .schema
-                .tables
-                .iter()
-                .find(|t| t.name == name)
-                .map(|tm| {
-                    let columns = tm.columns.clone();
-                    let fk_names: Vec<String> = tm
-                        .foreign_keys
-                        .iter()
-                        .map(|fk| fk.from_col.clone())
-                        .collect();
-                    let fk_cols: Vec<bool> =
-                        columns.iter().map(|c| fk_names.contains(&c.name)).collect();
-                    (columns, fk_cols)
+            if new_tab || self.active_tab.is_none() {
+                self.open_tabs.push(TableTab {
+                    table_name: name.clone(),
+                    row_count: None,
                 });
-
-            if let Some((columns, fk_cols)) = cols_and_fks {
-                self.spawn_grid_fetch(name, columns, fk_cols);
+                self.active_tab = Some(self.open_tabs.len() - 1);
+            } else if let Some(idx) = self.active_tab {
+                if let Some(tab) = self.open_tabs.get_mut(idx) {
+                    tab.table_name = name.clone();
+                    tab.row_count = None;
+                }
             }
+            self.spawn_row_count(name.clone());
+            self.request_table_view(&name);
         }
         self.dirty = true;
+    }
+
+    fn request_table_view(&mut self, name: &str) {
+        self.grid = None;
+        let cols_and_fks = self
+            .schema
+            .tables
+            .iter()
+            .find(|t| t.name == name)
+            .map(|tm| {
+                let columns = tm.columns.clone();
+                let fk_names: Vec<String> = tm
+                    .foreign_keys
+                    .iter()
+                    .map(|fk| fk.from_col.clone())
+                    .collect();
+                let fk_cols: Vec<bool> =
+                    columns.iter().map(|c| fk_names.contains(&c.name)).collect();
+                (columns, fk_cols)
+            });
+
+        if let Some((columns, fk_cols)) = cols_and_fks {
+            self.spawn_grid_fetch(name.to_string(), columns, fk_cols);
+        }
     }
 
     fn spawn_row_count(&self, table: String) {
@@ -2391,6 +2445,44 @@ impl App {
         self.dirty = true;
     }
 
+    fn jump_to_rowid(&mut self, table: String, rowid: i64) {
+        let maybe_fetch = if let Some(ref mut grid) = self.grid {
+            if grid.table_name == table {
+                grid.scroll_to_row(rowid - 1);
+                if grid.needs_fetch && !grid.window.fetch_in_flight {
+                    grid.window.fetch_in_flight = true;
+                    grid.needs_fetch = false;
+                    let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                    let sort = grid.sort.as_ref().and_then(|s| {
+                        grid.columns
+                            .get(s.col_idx)
+                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                    });
+                    Some((
+                        grid.table_name.clone(),
+                        grid.columns.clone(),
+                        sort,
+                        off,
+                        lim,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                self.pending_jump_target = Some((table, rowid));
+                None
+            }
+        } else {
+            self.pending_jump_target = Some((table, rowid));
+            None
+        };
+
+        if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+            self.spawn_window_fetch(&table, &cols, sort, off, lim);
+        }
+        self.dirty = true;
+    }
+
     fn update_row_count(&mut self, table: String, count: i64) {
         for tab in &mut self.open_tabs {
             if tab.table_name == table {
@@ -2408,6 +2500,12 @@ impl App {
             } else {
                 Some(idx.saturating_sub(1).min(self.open_tabs.len() - 1))
             };
+            if let Some(active_idx) = self.active_tab {
+                let table = self.open_tabs[active_idx].table_name.clone();
+                self.request_table_view(&table);
+            } else {
+                self.grid = None;
+            }
             self.dirty = true;
         }
     }
@@ -2415,6 +2513,8 @@ impl App {
     fn activate_tab(&mut self, idx: usize) {
         if idx < self.open_tabs.len() {
             self.active_tab = Some(idx);
+            let table = self.open_tabs[idx].table_name.clone();
+            self.request_table_view(&table);
             self.dirty = true;
         }
     }
@@ -2424,8 +2524,7 @@ impl App {
             return;
         }
         let current = self.active_tab.unwrap_or(0);
-        self.active_tab = Some((current + 1) % self.open_tabs.len());
-        self.dirty = true;
+        self.activate_tab((current + 1) % self.open_tabs.len());
     }
 
     fn prev_tab(&mut self) {
@@ -2433,8 +2532,7 @@ impl App {
             return;
         }
         let current = self.active_tab.unwrap_or(0);
-        self.active_tab = Some(current.checked_sub(1).unwrap_or(self.open_tabs.len() - 1));
-        self.dirty = true;
+        self.activate_tab(current.checked_sub(1).unwrap_or(self.open_tabs.len() - 1));
     }
 }
 

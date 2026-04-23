@@ -14,6 +14,7 @@ pub struct ValuePickerState {
     pub table: String,
     pub rowid: i64,
     pub col_name: String,
+    pub col_type: String,
     pub values: Vec<String>,
     pub filter: String,
     pub selected: usize,
@@ -26,6 +27,7 @@ impl ValuePickerState {
         table: String,
         rowid: i64,
         col_name: String,
+        col_type: String,
         values: Vec<String>,
         original: SqlValue,
     ) -> Self {
@@ -33,11 +35,24 @@ impl ValuePickerState {
             table,
             rowid,
             col_name,
+            col_type,
             values,
             filter: String::new(),
             selected: 0,
             original,
         }
+    }
+
+    pub fn selected_sql_value(&self) -> Option<SqlValue> {
+        let value = self.selected_value()?;
+        let upper = self.col_type.to_uppercase();
+        if upper.contains("INT") {
+            return value.parse::<i64>().ok().map(SqlValue::Integer);
+        }
+        if upper.contains("REAL") || upper.contains("FLOAT") || upper.contains("DOUBLE") {
+            return value.parse::<f64>().ok().map(SqlValue::Real);
+        }
+        Some(SqlValue::Text(value.to_string()))
     }
 
     pub fn filtered_values(&self) -> Vec<(usize, &str, Vec<usize>)> {

@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
-    widgets::Block,
+    widgets::{Block, Paragraph},
     Frame,
 };
 
@@ -57,6 +57,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         main_area
     };
+
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.theme.bg)),
+        content_area,
+    );
 
     if let Some(ref mut grid) = app.grid {
         let border_color = if matches!(app.focus, FocusPane::Grid) {
@@ -126,6 +131,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .style(ratatui::style::Style::default().fg(app.theme.fg_dim)),
             inner,
         );
+    } else {
+        let block = Block::bordered()
+            .style(Style::default().bg(app.theme.bg))
+            .border_style(Style::default().fg(app.theme.line))
+            .title(Span::styled(
+                "▌ TABLE",
+                Style::default().fg(app.theme.fg_mute),
+            ));
+        let inner = block.inner(content_area);
+        app.grid_outer_area = Some(content_area);
+        app.grid_inner_area = Some(inner);
+        frame.render_widget(block, content_area);
     }
 
     if let Some(ref mut popup) = app.popup {

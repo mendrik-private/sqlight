@@ -368,17 +368,12 @@ fn render_header(
 ) {
     let header_y = area.y;
     let header_style = Style::default().bg(theme.bg_raised);
-    buf.set_style(
-        Rect {
-            x: area.x,
-            y: header_y,
-            width: area.width,
-            height: 1,
-        },
+    buf.set_string(
+        area.x,
+        header_y,
+        " ".repeat(area.width as usize),
         header_style,
     );
-    let gutter_str = " ".repeat(gutter_width as usize);
-    buf.set_string(area.x, header_y, &gutter_str, header_style);
 
     let mut col_x = area.x + gutter_width;
     for &col_idx in visible_cols {
@@ -479,6 +474,23 @@ fn render_header(
 
         col_x += cell_w;
     }
+
+    if state.h_scroll + visible_cols.len() < state.col_widths.len() {
+        let chevron_reserve = if alphabet_rail::should_show_rail(state) {
+            alphabet_rail::RAIL_WIDTH + 1
+        } else {
+            1
+        };
+        let chevron_x = area.x + area.width.saturating_sub(chevron_reserve + 1);
+        if chevron_x >= area.x + gutter_width && chevron_x < area.x + area.width {
+            buf.set_string(
+                chevron_x,
+                header_y,
+                "▸",
+                Style::default().fg(theme.fg_mute).bg(theme.bg_raised),
+            );
+        }
+    }
 }
 
 fn render_data_rows(
@@ -510,13 +522,10 @@ fn render_data_rows(
             theme.bg_soft
         };
 
-        buf.set_style(
-            Rect {
-                x: area.x,
-                y: row_y,
-                width: area.width,
-                height: 1,
-            },
+        buf.set_string(
+            area.x,
+            row_y,
+            " ".repeat(area.width as usize),
             Style::default().bg(row_bg),
         );
 
@@ -546,6 +555,14 @@ fn render_data_rows(
                 let inner_w = (actual_w as usize).saturating_sub(2);
 
                 let is_focused_cell = is_focused && col_idx == state.focused_col;
+                if actual_w > 0 {
+                    buf.set_string(
+                        col_x,
+                        row_y,
+                        " ".repeat(actual_w as usize),
+                        Style::default().bg(row_bg),
+                    );
+                }
 
                 if let Some(val) = row_data.get(col_idx) {
                     let (content, align) = format_cell_content(val, col, inner_w);
@@ -719,8 +736,16 @@ pub fn render_grid(
 
     let gutter_digits = digits(state.window.total_rows.max(1));
     let gutter_width = (gutter_digits + 1) as u16;
-    // reserve 1 col on the right for the vertical scrollbar
-    let data_width = area.width.saturating_sub(gutter_width).saturating_sub(1);
+    let rail_width = if alphabet_rail::should_show_rail(state) {
+        alphabet_rail::RAIL_WIDTH
+    } else {
+        0
+    };
+    // reserve right-side space for scrollbar and optional alphabet rail
+    let data_width = area
+        .width
+        .saturating_sub(gutter_width)
+        .saturating_sub(1 + rail_width);
     state.avail_col_width = data_width;
 
     let mut visible_cols: Vec<usize> = Vec::new();
@@ -783,7 +808,15 @@ pub fn hit_test(area: Rect, state: &GridState, x: u16, y: u16) -> Option<GridHit
 
     let gutter_digits = digits(state.window.total_rows.max(1));
     let gutter_width = (gutter_digits + 1) as u16;
-    let data_width = area.width.saturating_sub(gutter_width).saturating_sub(1);
+    let rail_width = if alphabet_rail::should_show_rail(state) {
+        alphabet_rail::RAIL_WIDTH
+    } else {
+        0
+    };
+    let data_width = area
+        .width
+        .saturating_sub(gutter_width)
+        .saturating_sub(1 + rail_width);
 
     if x >= area.x + area.width.saturating_sub(1) {
         return Some(GridHit::Scrollbar);

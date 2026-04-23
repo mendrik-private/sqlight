@@ -248,3 +248,30 @@ pub fn fetch_rows(
 
     rows.collect::<Result<Vec<_>, _>>().context("fetching rows")
 }
+
+pub fn load_distinct_values(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
+    use rusqlite::types::ValueRef;
+
+    let sql = format!(
+        "SELECT DISTINCT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL ORDER BY 1 LIMIT {limit}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        let value = match row.get_ref(0)? {
+            ValueRef::Null => String::new(),
+            ValueRef::Integer(n) => n.to_string(),
+            ValueRef::Real(f) => f.to_string(),
+            ValueRef::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            ValueRef::Blob(bytes) => format!("<blob {} bytes>", bytes.len()),
+        };
+        Ok(value)
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("loading distinct values")
+}

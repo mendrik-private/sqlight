@@ -98,14 +98,6 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().bg(theme.bg_soft),
         );
     }
-
-    if x < right {
-        let plus_style = Style::default()
-            .fg(theme.fg_mute)
-            .bg(theme.bg_soft)
-            .add_modifier(Modifier::BOLD);
-        let _ = put(buf, x, area.y, right, "+", plus_style);
-    }
 }
 
 pub fn hit_test(
