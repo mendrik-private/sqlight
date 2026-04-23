@@ -6,7 +6,12 @@ pub mod fk_picker;
 pub mod text_editor;
 pub mod value_picker;
 
-use ratatui::{layout::Rect, Frame};
+use ratatui::{
+    layout::Rect,
+    style::Style,
+    widgets::{Block, Clear},
+    Frame,
+};
 
 use crate::{config::Config, theme::Theme};
 
@@ -27,6 +32,11 @@ pub enum PopupKind {
     FkPicker(FkPickerState),
     FilterPopup(FilterPopupState),
     CommandPalette(CommandPaletteState),
+}
+
+pub(crate) fn paint_popup_surface(frame: &mut Frame, area: Rect, theme: &Theme) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(Style::default().bg(theme.bg_raised)), area);
 }
 
 pub fn render_popup(

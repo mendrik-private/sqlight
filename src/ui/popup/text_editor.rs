@@ -152,6 +152,8 @@ pub fn render(
         height: popup_height.min(area.height),
     };
 
+    super::paint_popup_surface(frame, popup_area, theme);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))

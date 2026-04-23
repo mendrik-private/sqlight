@@ -100,6 +100,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Th
         height: popup_height,
     };
 
+    super::paint_popup_surface(frame, popup_area, theme);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
