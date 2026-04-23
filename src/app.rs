@@ -767,14 +767,13 @@ impl App {
                         let upper = col.col_type.to_uppercase();
                         let original = cell_value;
                         let looks_like_epoch_datetime =
-                            (upper.contains("INT") || upper.contains("NUM"))
-                                && {
-                                    let name = col.name.to_lowercase();
-                                    name.ends_with("_at")
-                                        || name.contains("timestamp")
-                                        || name.contains("created_at")
-                                        || name.contains("updated_at")
-                                };
+                            (upper.contains("INT") || upper.contains("NUM")) && {
+                                let name = col.name.to_lowercase();
+                                name.ends_with("_at")
+                                    || name.contains("timestamp")
+                                    || name.contains("created_at")
+                                    || name.contains("updated_at")
+                            };
                         if upper.contains("TIMESTAMP")
                             || upper.contains("DATETIME")
                             || (upper.contains("DATE") && upper.contains("TIME"))
@@ -2143,7 +2142,8 @@ impl App {
                 let _ = self.tx.send(Message::OpenPopup);
             }
             (KeyCode::Esc, _) => {
-                let _ = self.tx.send(Message::ClosePopup);
+                self.focus = FocusPane::Sidebar;
+                self.dirty = true;
             }
             (KeyCode::Backspace, _) => {
                 if !self.jump_stack.is_empty() {
@@ -2219,6 +2219,7 @@ impl App {
     }
 
     fn open_table_with_mode(&mut self, name: String, new_tab: bool) {
+        self.focus = FocusPane::Grid;
         if let Some(idx) = self.open_tabs.iter().position(|t| t.table_name == name) {
             self.active_tab = Some(idx);
             self.request_table_view(&name);
