@@ -757,7 +757,10 @@ impl App {
 
                         let upper = col.col_type.to_uppercase();
                         let original = cell_value;
-                        if upper.contains("DATE") && upper.contains("TIME") {
+                        if upper.contains("TIMESTAMP")
+                            || upper.contains("DATETIME")
+                            || (upper.contains("DATE") && upper.contains("TIME"))
+                        {
                             self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
                                 table_name,
                                 actual_rowid,
