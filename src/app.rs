@@ -6,8 +6,20 @@ use crate::{
     config::Config,
     db::{self, schema::Column, schema::Schema, types::SqlValue, DbPool},
     theme::Theme,
-    ui::sidebar::{SidebarAction, SidebarState},
+    ui::{
+        popup::{
+            DatePickerState, DatetimePickerState, PopupKind, TextEditorState,
+        },
+        sidebar::{SidebarAction, SidebarState},
+        toast::{ToastKind, ToastState},
+    },
 };
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppMode {
+    Browse,
+    Edit,
+}
 
 pub enum FocusPane {
     Sidebar,
@@ -31,6 +43,10 @@ pub struct App {
     pub active_tab: Option<usize>,
     pub sidebar_visible: bool,
     pub grid: Option<crate::grid::GridState>,
+    pub mode: AppMode,
+    pub popup: Option<PopupKind>,
+    pub toast: ToastState,
+    pub readonly: bool,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -76,6 +92,18 @@ pub enum Message {
     MoveColLast,
     MoveFirstCell,
     MoveLastCell,
+    OpenPopup,
+    ClosePopup,
+    CommitEdit,
+    EditCommitted {
+        rowid: i64,
+    },
+    EditFailed(String),
+    DistinctCountReady {
+        col: String,
+        count: i64,
+        values: Vec<String>,
+    },
 }
 
 impl App {
@@ -84,6 +112,7 @@ impl App {
         config: Config,
         pool: Arc<DbPool>,
         tx: UnboundedSender<Message>,
+        readonly: bool,
     ) -> Self {
         Self {
             schema,
@@ -97,6 +126,10 @@ impl App {
             active_tab: None,
             sidebar_visible: true,
             grid: None,
+            mode: AppMode::Browse,
+            popup: None,
+            toast: ToastState::new(),
+            readonly,
             pool,
             tx,
         }
@@ -112,6 +145,7 @@ impl App {
             }
             Message::Mouse(_ev) => {}
             Message::Tick => {
+                self.toast.tick();
                 let maybe_fetch = if let Some(ref mut grid) = self.grid {
                     grid.window.tick_count = grid.window.tick_count.wrapping_add(1);
                     if grid.needs_fetch && !grid.window.fetch_in_flight {
@@ -355,6 +389,112 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Message::OpenPopup => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    return;
+                }
+                if let Some(ref grid) = self.grid {
+                    let col = grid.columns.get(grid.focused_col).cloned();
+                    let table = grid.table_name.clone();
+                    let cell_value = grid
+                        .window
+                        .get_row(grid.viewport_start + grid.focused_row as i64)
+                        .and_then(|r| r.get(grid.focused_col))
+                        .cloned()
+                        .unwrap_or(SqlValue::Null);
+                    let actual_rowid = grid.viewport_start + grid.focused_row as i64 + 1;
+
+                    if let Some(col) = col {
+                        let upper = col.col_type.to_uppercase();
+                        let original = cell_value;
+                        if upper.contains("DATE") && upper.contains("TIME") {
+                            self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
+                                table,
+                                actual_rowid,
+                                col.name,
+                                original,
+                            )));
+                        } else if upper.contains("DATE") {
+                            self.popup = Some(PopupKind::DatePicker(DatePickerState::new(
+                                table,
+                                actual_rowid,
+                                col.name,
+                                original,
+                            )));
+                        } else {
+                            self.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+                                table,
+                                actual_rowid,
+                                col.name.clone(),
+                                col.col_type.clone(),
+                                original,
+                                self.readonly,
+                            )));
+                        }
+                        self.mode = AppMode::Edit;
+                    }
+                }
+                self.dirty = true;
+            }
+            Message::ClosePopup => {
+                self.popup = None;
+                self.mode = AppMode::Browse;
+                self.dirty = true;
+            }
+            Message::CommitEdit => {
+                let write_info = self.popup.as_ref().and_then(|p| match p {
+                    PopupKind::TextEditor(s) => Some((
+                        s.table.clone(),
+                        s.col_name.clone(),
+                        s.rowid,
+                        s.as_sql_value(),
+                    )),
+                    PopupKind::ValuePicker(s) => s.selected_value().map(|v| {
+                        (
+                            s.table.clone(),
+                            s.col_name.clone(),
+                            s.rowid,
+                            SqlValue::Text(v.to_string()),
+                        )
+                    }),
+                    PopupKind::DatePicker(s) => Some((
+                        s.table.clone(),
+                        s.col_name.clone(),
+                        s.rowid,
+                        s.as_sql_value(),
+                    )),
+                    PopupKind::DatetimePicker(s) => Some((
+                        s.table.clone(),
+                        s.col_name.clone(),
+                        s.rowid,
+                        s.as_sql_value(),
+                    )),
+                });
+                if let Some((table, col, rowid, value)) = write_info {
+                    let pool = Arc::clone(&self.pool);
+                    let tx = self.tx.clone();
+                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                        let conn = pool.get()?;
+                        crate::db::write::commit_cell_edit(&conn, &table, &col, rowid, &value)?;
+                        let _ = tx.send(Message::EditCommitted { rowid });
+                        Ok(())
+                    });
+                }
+                self.popup = None;
+                self.mode = AppMode::Browse;
+                self.dirty = true;
+            }
+            Message::EditCommitted { rowid: _ } => {
+                self.toast
+                    .push("Cell updated successfully", ToastKind::Success);
+                self.dirty = true;
+            }
+            Message::EditFailed(err) => {
+                self.toast.push(format!("Error: {}", err), ToastKind::Error);
+                self.dirty = true;
+            }
+            Message::DistinctCountReady { .. } => {}
         }
     }
 
@@ -364,6 +504,14 @@ impl App {
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        match self.mode {
+            AppMode::Edit => {
+                self.handle_edit_key(key);
+                return;
+            }
+            AppMode::Browse => {}
+        }
 
         match (key.code, key.modifiers) {
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
@@ -393,6 +541,125 @@ impl App {
             _ => match self.focus {
                 FocusPane::Sidebar => self.handle_sidebar_key(key),
                 FocusPane::Grid => self.handle_grid_key(key),
+            },
+        }
+    }
+
+    fn handle_edit_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match &mut self.popup {
+            None => {
+                self.mode = AppMode::Browse;
+            }
+            Some(PopupKind::TextEditor(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::CommitEdit);
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    state.insert_char(c);
+                    self.dirty = true;
+                }
+                KeyCode::Backspace => {
+                    state.delete_backward();
+                    self.dirty = true;
+                }
+                KeyCode::Left => {
+                    state.move_cursor_left();
+                    self.dirty = true;
+                }
+                KeyCode::Right => {
+                    state.move_cursor_right();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::ValuePicker(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::CommitEdit);
+                }
+                KeyCode::Up => {
+                    state.move_up();
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    state.move_down();
+                    self.dirty = true;
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    state.push_filter_char(c);
+                    self.dirty = true;
+                }
+                KeyCode::Backspace => {
+                    state.pop_filter_char();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::DatePicker(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::CommitEdit);
+                }
+                KeyCode::PageUp => {
+                    state.prev_month();
+                    self.dirty = true;
+                }
+                KeyCode::PageDown => {
+                    state.next_month();
+                    self.dirty = true;
+                }
+                KeyCode::Left => {
+                    state.move_day(-1);
+                    self.dirty = true;
+                }
+                KeyCode::Right => {
+                    state.move_day(1);
+                    self.dirty = true;
+                }
+                KeyCode::Up => {
+                    state.move_day(-7);
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    state.move_day(7);
+                    self.dirty = true;
+                }
+                KeyCode::Delete => {
+                    state.clear();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::DatetimePicker(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::CommitEdit);
+                }
+                KeyCode::PageUp => {
+                    state.prev_month();
+                    self.dirty = true;
+                }
+                KeyCode::PageDown => {
+                    state.next_month();
+                    self.dirty = true;
+                }
+                _ => {}
             },
         }
     }
@@ -430,6 +697,12 @@ impl App {
             }
             (KeyCode::PageUp, _) => {
                 let _ = self.tx.send(Message::ScrollUp(vp.saturating_sub(1)));
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::OpenPopup);
+            }
+            (KeyCode::Esc, _) => {
+                let _ = self.tx.send(Message::ClosePopup);
             }
             _ => {}
         }

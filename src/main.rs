@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let mut app = App::new(schema, config, pool, tx);
+    let mut app = App::new(schema, config, pool, tx, args.readonly);
 
     run_event_loop(&mut terminal, &mut app, &mut rx).await?;
 

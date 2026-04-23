@@ -1,6 +1,7 @@
 pub mod query;
 pub mod schema;
 pub mod types;
+pub mod write;
 
 use anyhow::Context;
 use r2d2_sqlite::SqliteConnectionManager;

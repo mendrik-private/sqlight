@@ -1,6 +1,8 @@
+pub mod popup;
 pub mod sidebar;
 pub mod statusbar;
 pub mod tabbar;
+pub mod toast;
 
 use crate::app::{App, FocusPane};
 use ratatui::{
@@ -58,4 +60,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             content_area,
         );
     }
+
+    if let Some(ref mut popup) = app.popup {
+        crate::ui::popup::render_popup(frame, area, popup, &app.theme, &app.config);
+    }
+    crate::ui::toast::render_toasts(frame, area, &app.toast, &app.theme);
 }
