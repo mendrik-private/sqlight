@@ -766,9 +766,19 @@ impl App {
 
                         let upper = col.col_type.to_uppercase();
                         let original = cell_value;
+                        let looks_like_epoch_datetime =
+                            (upper.contains("INT") || upper.contains("NUM"))
+                                && {
+                                    let name = col.name.to_lowercase();
+                                    name.ends_with("_at")
+                                        || name.contains("timestamp")
+                                        || name.contains("created_at")
+                                        || name.contains("updated_at")
+                                };
                         if upper.contains("TIMESTAMP")
                             || upper.contains("DATETIME")
                             || (upper.contains("DATE") && upper.contains("TIME"))
+                            || looks_like_epoch_datetime
                         {
                             self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
                                 table_name,

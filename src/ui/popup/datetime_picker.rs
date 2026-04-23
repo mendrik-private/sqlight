@@ -21,14 +21,23 @@ pub struct DatetimePickerState {
     pub view_month: NaiveDate,
     pub original: SqlValue,
     pub focus_date: bool,
+    pub epoch_millis: bool,
 }
 
 impl DatetimePickerState {
     pub fn new(table: String, rowid: i64, col_name: String, original: SqlValue) -> Self {
         let dt = match &original {
             SqlValue::Text(s) => NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok(),
+            SqlValue::Integer(n) => {
+                if *n > 1_000_000_000_000 {
+                    chrono::DateTime::from_timestamp_millis(*n).map(|dt| dt.naive_utc())
+                } else {
+                    chrono::DateTime::from_timestamp(*n, 0).map(|dt| dt.naive_utc())
+                }
+            }
             _ => None,
         };
+        let epoch_millis = matches!(&original, SqlValue::Integer(n) if *n > 1_000_000_000_000);
         let today = chrono::Local::now().naive_local();
         let (date, hour, minute, second) = if let Some(d) = dt {
             (
@@ -53,6 +62,7 @@ impl DatetimePickerState {
             view_month,
             original,
             focus_date: true,
+            epoch_millis,
         }
     }
 
@@ -88,7 +98,16 @@ impl DatetimePickerState {
                                 .unwrap_or_default()
                         })
                     });
-                SqlValue::Text(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                if matches!(self.original, SqlValue::Integer(_)) {
+                    let epoch = dt.and_utc().timestamp();
+                    if self.epoch_millis {
+                        SqlValue::Integer(epoch.saturating_mul(1000))
+                    } else {
+                        SqlValue::Integer(epoch)
+                    }
+                } else {
+                    SqlValue::Text(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                }
             }
             None => SqlValue::Null,
         }
