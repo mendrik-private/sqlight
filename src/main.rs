@@ -21,7 +21,6 @@ use config::Config;
 #[command(name = "sqv", about = "Terminal SQLite viewer")]
 struct Args {
     /// Path to SQLite database file, or :memory:
-    #[arg(required_unless_present = "subcommand")]
     path: Option<String>,
     /// Open database in read-only mode
     #[arg(long)]
@@ -72,7 +71,14 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let path = args.path.as_deref().unwrap_or(":memory:");
+    let path = match args.path.as_deref() {
+        Some(p) => p.to_string(),
+        None => {
+            eprintln!("Error: path argument required (or use `sqv check-terminal`)");
+            std::process::exit(1);
+        }
+    };
+    let path = path.as_str();
 
     if path != ":memory:" && !std::path::Path::new(path).exists() {
         eprintln!("Error: database file '{}' does not exist", path);
