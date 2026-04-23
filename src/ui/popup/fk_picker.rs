@@ -252,6 +252,7 @@ pub fn render(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_preview(
     buf: &mut Buffer,
     x: u16,
