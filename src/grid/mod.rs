@@ -162,6 +162,19 @@ impl GridState {
         }
     }
 
+    pub fn focus_cell(&mut self, row: usize, col: usize) {
+        if self.columns.is_empty() {
+            self.focused_row = row.min(self.window.total_rows.saturating_sub(1) as usize);
+            self.focused_col = 0;
+            return;
+        }
+        self.focused_row = row.min(self.window.total_rows.saturating_sub(1) as usize);
+        self.focused_col = col.min(self.columns.len() - 1);
+        self.adjust_viewport();
+        self.adjust_h_scroll();
+        self.check_needs_fetch();
+    }
+
     fn adjust_h_scroll(&mut self) {
         if self.focused_col < self.h_scroll {
             self.h_scroll = self.focused_col;
@@ -755,4 +768,82 @@ pub fn render_grid(
     }
     let _ = buf;
     alphabet_rail::render_rail(frame, area, state, theme);
+}
+
+pub fn hit_test(area: Rect, state: &GridState, x: u16, y: u16) -> Option<GridHit> {
+    if area.width == 0
+        || area.height == 0
+        || x < area.x
+        || x >= area.x + area.width
+        || y < area.y
+        || y >= area.y + area.height
+    {
+        return None;
+    }
+
+    let gutter_digits = digits(state.window.total_rows.max(1));
+    let gutter_width = (gutter_digits + 1) as u16;
+    let data_width = area.width.saturating_sub(gutter_width).saturating_sub(1);
+
+    if x >= area.x + area.width.saturating_sub(1) {
+        return Some(GridHit::Scrollbar);
+    }
+
+    if y == area.y {
+        let col = hit_test_col(area, state, x, gutter_width, data_width)?;
+        return Some(GridHit::Header(col));
+    }
+
+    if x < area.x + gutter_width {
+        let row = hit_test_row(area, state, y)?;
+        return Some(GridHit::RowGutter(row));
+    }
+
+    let row = hit_test_row(area, state, y)?;
+    let col = hit_test_col(area, state, x, gutter_width, data_width)?;
+    Some(GridHit::Cell { row, col })
+}
+
+pub enum GridHit {
+    Header(usize),
+    RowGutter(usize),
+    Cell { row: usize, col: usize },
+    Scrollbar,
+}
+
+fn hit_test_row(area: Rect, state: &GridState, y: u16) -> Option<usize> {
+    if y <= area.y {
+        return None;
+    }
+    let row_in_view = (y - area.y - 1) as i64;
+    let abs_row = state.viewport_start + row_in_view;
+    if abs_row < 0 || abs_row >= state.window.total_rows {
+        None
+    } else {
+        Some(abs_row as usize)
+    }
+}
+
+fn hit_test_col(
+    area: Rect,
+    state: &GridState,
+    x: u16,
+    gutter_width: u16,
+    data_width: u16,
+) -> Option<usize> {
+    let mut col_x = area.x + gutter_width;
+    let mut cumul = 0u16;
+    for col_idx in state.h_scroll..state.col_widths.len() {
+        let w = state.col_widths[col_idx];
+        if !(cumul == 0 || cumul + w <= data_width) {
+            break;
+        }
+        let col_end = col_x.saturating_add(w);
+        if x >= col_x && x < col_end {
+            return Some(col_idx);
+        }
+        cumul += w;
+        col_x = col_end;
+    }
+    None
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ratatui::layout::Rect;
 use rusqlite::OptionalExtension;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -21,6 +22,7 @@ use crate::{
             FkPickerState, PaletteCommand, PopupKind, TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
+        tabbar::TabMouseAction,
         toast::{ToastKind, ToastState},
     },
 };
@@ -95,6 +97,10 @@ pub struct App {
     pub db_path: String,
     pub undo_stack: Vec<UndoFrame>,
     pub pending_confirm: Option<PendingConfirm>,
+    pub tabbar_area: Rect,
+    pub sidebar_area: Option<Rect>,
+    pub grid_outer_area: Option<Rect>,
+    pub grid_inner_area: Option<Rect>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -228,6 +234,10 @@ impl App {
             db_path,
             undo_stack: Vec::new(),
             pending_confirm: None,
+            tabbar_area: Rect::default(),
+            sidebar_area: None,
+            grid_outer_area: None,
+            grid_inner_area: None,
             pool,
             tx,
         }
@@ -241,7 +251,10 @@ impl App {
                 self.dirty = true;
                 self.handle_key(key);
             }
-            Message::Mouse(_ev) => {}
+            Message::Mouse(ev) => {
+                self.dirty = true;
+                self.handle_mouse(ev);
+            }
             Message::Tick => {
                 self.toast.tick();
                 let maybe_fetch = if let Some(ref mut grid) = self.grid {
@@ -1685,6 +1698,84 @@ impl App {
             let osc52 = format!("\x1b]52;c;{}\x07", encoded);
             let _ = std::io::stdout().write_all(osc52.as_bytes());
             let _ = std::io::stdout().flush();
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        if self.popup.is_some() || matches!(self.mode, AppMode::Edit) {
+            return;
+        }
+
+        let middle_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Middle));
+        let left_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        if !left_click && !middle_click {
+            return;
+        }
+
+        let x = mouse.column;
+        let y = mouse.row;
+
+        if let Some(action) =
+            crate::ui::tabbar::hit_test(self.tabbar_area, self, x, y, middle_click)
+        {
+            match action {
+                TabMouseAction::Activate(idx) => self.activate_tab(idx),
+                TabMouseAction::Close(idx) => self.close_tab(idx),
+            }
+            return;
+        }
+
+        if let Some(area) = self.sidebar_area {
+            if self.sidebar_visible
+                && x >= area.x
+                && x < area.x + area.width
+                && y >= area.y
+                && y < area.y + area.height
+            {
+                self.focus = FocusPane::Sidebar;
+                if left_click {
+                    if let Some(action) = self.sidebar.click_at(area, &self.schema, x, y) {
+                        match action {
+                            SidebarAction::OpenTable(name) => self.open_table(name),
+                            SidebarAction::Toggle => {}
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Some(area) = self.grid_inner_area {
+            if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
+                self.focus = FocusPane::Grid;
+                if !left_click {
+                    return;
+                }
+                let mut cycle_sort = false;
+                if let Some(grid) = self.grid.as_mut() {
+                    if let Some(hit) = crate::grid::hit_test(area, grid, x, y) {
+                        match hit {
+                            crate::grid::GridHit::Header(col) => {
+                                grid.focus_cell(grid.focused_row, col);
+                                cycle_sort = true;
+                            }
+                            crate::grid::GridHit::RowGutter(row) => {
+                                grid.focus_cell(row, grid.focused_col);
+                            }
+                            crate::grid::GridHit::Cell { row, col } => {
+                                grid.focus_cell(row, col);
+                            }
+                            crate::grid::GridHit::Scrollbar => {}
+                        }
+                    }
+                }
+                if cycle_sort {
+                    let _ = self.tx.send(Message::CycleSort);
+                }
+                return;
+            }
         }
     }
 

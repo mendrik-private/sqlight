@@ -7,6 +7,11 @@ use ratatui::{
 
 use crate::app::App;
 
+pub enum TabMouseAction {
+    Activate(usize),
+    Close(usize),
+}
+
 pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -101,6 +106,45 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD);
         let _ = put(buf, x, area.y, right, "+", plus_style);
     }
+}
+
+pub fn hit_test(
+    area: Rect,
+    app: &App,
+    x: u16,
+    y: u16,
+    middle_click: bool,
+) -> Option<TabMouseAction> {
+    if area.width == 0 || area.height == 0 || y != area.y || x < area.x || x >= area.x + area.width
+    {
+        return None;
+    }
+
+    let mut cursor = area.x;
+    let right = area.x + area.width;
+    for (idx, tab) in app.open_tabs.iter().enumerate() {
+        if cursor >= right {
+            break;
+        }
+        let lead_w = 2u16;
+        let name_w = tab.table_name.chars().count() as u16;
+        let badge_w = match tab.row_count {
+            Some(count) => format!(" {} ", count).chars().count() as u16,
+            None => 3,
+        };
+        let tab_width = lead_w + name_w + 1 + badge_w + 1 + 1 + 2;
+        let tab_end = cursor.saturating_add(tab_width).min(right);
+        if x >= cursor && x < tab_end {
+            let close_x = cursor + lead_w + name_w + 1 + badge_w + 1;
+            if middle_click || x == close_x {
+                return Some(TabMouseAction::Close(idx));
+            }
+            return Some(TabMouseAction::Activate(idx));
+        }
+        cursor = tab_end;
+    }
+
+    None
 }
 
 fn put(buf: &mut Buffer, mut x: u16, y: u16, right: u16, text: &str, style: Style) -> u16 {

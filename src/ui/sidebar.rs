@@ -113,6 +113,32 @@ impl SidebarState {
         None
     }
 
+    pub fn click_at(
+        &mut self,
+        area: Rect,
+        schema: &Schema,
+        x: u16,
+        y: u16,
+    ) -> Option<SidebarAction> {
+        let inner = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        };
+        if x < inner.x || x >= inner.x + inner.width || y < inner.y || y >= inner.y + inner.height {
+            return None;
+        }
+
+        let idx = (y - inner.y) as usize;
+        if idx >= self.visible_count(schema) {
+            return None;
+        }
+        self.selected = idx;
+        self.list_state.select(Some(idx));
+        self.enter(schema)
+    }
+
     fn clamp_selection(&mut self, schema: &Schema) {
         let total = self.visible_count(schema);
         if self.selected >= total {

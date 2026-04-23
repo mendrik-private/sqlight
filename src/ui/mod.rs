@@ -6,7 +6,7 @@ pub mod toast;
 
 use crate::app::{App, FocusPane};
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
     widgets::Block,
@@ -15,6 +15,10 @@ use ratatui::{
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.tabbar_area = Rect::default();
+    app.sidebar_area = None;
+    app.grid_outer_area = None;
+    app.grid_inner_area = None;
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -25,6 +29,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
+    app.tabbar_area = vertical[0];
     tabbar::render_tabbar(frame, vertical[0], app);
     statusbar::render_statusbar(frame, vertical[2], app);
 
@@ -47,6 +52,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             &app.config,
             focused,
         );
+        app.sidebar_area = Some(horizontal[0]);
         horizontal[1]
     } else {
         main_area
@@ -97,6 +103,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             ))
             .title_bottom(Span::styled(meta, Style::default().fg(app.theme.fg_mute)));
         let inner = block.inner(content_area);
+        app.grid_outer_area = Some(content_area);
+        app.grid_inner_area = Some(inner);
         frame.render_widget(block, content_area);
         crate::grid::render_grid(frame, inner, grid, &app.theme, &app.config);
     } else if let Some(active_idx) = app.active_tab {
@@ -109,6 +117,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 Style::default().fg(app.theme.fg_mute),
             ));
         let inner = block.inner(content_area);
+        app.grid_outer_area = Some(content_area);
+        app.grid_inner_area = Some(inner);
         frame.render_widget(block, content_area);
         let msg = format!(" Loading {}...", tab.table_name);
         frame.render_widget(
