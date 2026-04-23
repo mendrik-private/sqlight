@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod db;
 mod event;
+mod export;
 mod filter;
 mod grid;
 mod theme;
@@ -20,10 +21,19 @@ use config::Config;
 #[command(name = "sqv", about = "Terminal SQLite viewer")]
 struct Args {
     /// Path to SQLite database file, or :memory:
-    path: String,
+    #[arg(required_unless_present = "subcommand")]
+    path: Option<String>,
     /// Open database in read-only mode
     #[arg(long)]
     readonly: bool,
+    #[command(subcommand)]
+    subcommand: Option<SubCmd>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum SubCmd {
+    /// Check terminal capabilities
+    CheckTerminal,
 }
 
 struct TerminalGuard;
@@ -57,8 +67,15 @@ impl Drop for TerminalGuard {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    if args.path != ":memory:" && !std::path::Path::new(&args.path).exists() {
-        eprintln!("Error: database file '{}' does not exist", args.path);
+    if let Some(SubCmd::CheckTerminal) = &args.subcommand {
+        check_terminal();
+        return Ok(());
+    }
+
+    let path = args.path.as_deref().unwrap_or(":memory:");
+
+    if path != ":memory:" && !std::path::Path::new(path).exists() {
+        eprintln!("Error: database file '{}' does not exist", path);
         std::process::exit(1);
     }
 
@@ -77,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
 
     let pool = Arc::new(
-        db::open_pool(&args.path, args.readonly)
-            .with_context(|| format!("Failed to open database '{}'", args.path))?,
+        db::open_pool(path, args.readonly)
+            .with_context(|| format!("Failed to open database '{}'", path))?,
     );
 
     let conn = pool.get().context("Failed to get DB connection")?;
@@ -90,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let mut app = App::new(schema, config, pool, tx, args.readonly, args.path.clone());
+    let mut app = App::new(schema, config, pool, tx, args.readonly, path.to_string());
 
     run_event_loop(&mut terminal, &mut app, &mut rx).await?;
 
@@ -139,4 +156,37 @@ async fn run_event_loop(
     }
 
     Ok(())
+}
+
+fn check_terminal() {
+    let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unknown".to_string());
+    let color_support = match colorterm.to_lowercase().as_str() {
+        "truecolor" | "24bit" => "truecolor ✓",
+        "256color" => "256color",
+        _ => "unknown",
+    };
+
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
+    let term = std::env::var("TERM").unwrap_or_default();
+    let mouse = if term.contains("xterm") || !term_program.is_empty() {
+        "yes"
+    } else {
+        "unknown"
+    };
+
+    println!("Terminal capabilities:");
+    println!("  COLORTERM: {}", color_support);
+    println!(
+        "  TERM_PROGRAM: {}",
+        if term_program.is_empty() {
+            "unknown".to_string()
+        } else {
+            term_program
+        }
+    );
+    println!("  Mouse support: {} (from TERM)", mouse);
+    println!("  Unicode: yes");
+    println!(
+        "  Nerd fonts: not detectable (set ui.nerd_font = false in config if icons look wrong)"
+    );
 }

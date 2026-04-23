@@ -1,3 +1,4 @@
+pub mod command_palette;
 pub mod date_picker;
 pub mod datetime_picker;
 pub mod filter;
@@ -9,6 +10,7 @@ use ratatui::{layout::Rect, Frame};
 
 use crate::{config::Config, theme::Theme};
 
+pub use command_palette::{CommandPaletteState, PaletteCommand};
 pub use date_picker::DatePickerState;
 pub use datetime_picker::DatetimePickerState;
 pub use filter::FilterPopupState;
@@ -24,6 +26,7 @@ pub enum PopupKind {
     DatetimePicker(DatetimePickerState),
     FkPicker(FkPickerState),
     FilterPopup(FilterPopupState),
+    CommandPalette(CommandPaletteState),
 }
 
 pub fn render_popup(
@@ -40,5 +43,8 @@ pub fn render_popup(
         PopupKind::DatetimePicker(state) => datetime_picker::render(frame, area, state, theme),
         PopupKind::FkPicker(state) => fk_picker::render(frame, area, state, theme, config),
         PopupKind::FilterPopup(state) => filter::render(frame, area, state, theme, config),
+        PopupKind::CommandPalette(state) => {
+            command_palette::render(frame, area, state, theme, config)
+        }
     }
 }

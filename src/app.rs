@@ -17,8 +17,8 @@ use crate::{
     theme::Theme,
     ui::{
         popup::{
-            DatePickerState, DatetimePickerState, FilterPopupState, FkPickerState, PopupKind,
-            TextEditorState,
+            CommandPaletteState, DatePickerState, DatetimePickerState, FilterPopupState,
+            FkPickerState, PaletteCommand, PopupKind, TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
         toast::{ToastKind, ToastState},
@@ -187,6 +187,16 @@ pub enum Message {
         table: String,
         rowid: i64,
     },
+    OpenCommandPalette,
+    ExecuteCommand(PaletteCommand),
+    ExportDone {
+        format: String,
+        path: String,
+        count: u64,
+    },
+    ReloadSchema,
+    SchemaReady(Schema),
+    CopyCell,
 }
 
 impl App {
@@ -817,6 +827,7 @@ impl App {
                         )
                     }),
                     PopupKind::FilterPopup(_) => None,
+                    PopupKind::CommandPalette(_) => None,
                 });
                 if let Some((table, col, rowid, value, original)) = write_info {
                     let pool = Arc::clone(&self.pool);
@@ -1468,11 +1479,213 @@ impl App {
                     self.dirty = true;
                 }
             }
+            Message::OpenCommandPalette => {
+                let table_names = self.schema.tables.iter().map(|t| t.name.clone()).collect();
+                let state = CommandPaletteState::new(table_names);
+                self.popup = Some(PopupKind::CommandPalette(state));
+                self.mode = AppMode::Edit;
+                self.dirty = true;
+            }
+            Message::ExecuteCommand(cmd) => {
+                self.execute_palette_command(cmd);
+                self.dirty = true;
+            }
+            Message::ExportDone {
+                format: _,
+                path,
+                count,
+            } => {
+                self.toast.push(
+                    format!("Exported {} rows to {}", count, path),
+                    ToastKind::Success,
+                );
+                self.dirty = true;
+            }
+            Message::ReloadSchema => {
+                let pool = Arc::clone(&self.pool);
+                let tx = self.tx.clone();
+                tokio::task::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let conn = pool.get()?;
+                        crate::db::load_schema(&conn)
+                    })
+                    .await;
+                    if let Ok(Ok(schema)) = result {
+                        let _ = tx.send(Message::SchemaReady(schema));
+                    }
+                });
+                self.dirty = true;
+            }
+            Message::SchemaReady(schema) => {
+                self.schema = schema;
+                self.sidebar.tables_expanded = true;
+                self.toast.push("Schema reloaded", ToastKind::Success);
+                self.dirty = true;
+            }
+            Message::CopyCell => {
+                let text = self.grid.as_ref().and_then(|g| {
+                    let abs_row = g.focused_row as i64;
+                    let col_idx = g.focused_col;
+                    g.window.get_row(abs_row)?.get(col_idx).map(|v| match v {
+                        SqlValue::Null => "NULL".to_string(),
+                        SqlValue::Integer(n) => n.to_string(),
+                        SqlValue::Real(f) => f.to_string(),
+                        SqlValue::Text(s) => s.clone(),
+                        SqlValue::Blob(b) => format!("<blob {} bytes>", b.len()),
+                    })
+                });
+                if let Some(text) = text {
+                    use std::io::Write;
+                    let encoded = base64_encode(text.as_bytes());
+                    let osc52 = format!("\x1b]52;c;{}\x07", encoded);
+                    let _ = std::io::stdout().write_all(osc52.as_bytes());
+                    let _ = std::io::stdout().flush();
+                    self.toast.push("Copied to clipboard", ToastKind::Success);
+                }
+                self.dirty = true;
+            }
         }
     }
 
     pub fn view(&mut self, frame: &mut ratatui::Frame) {
         crate::ui::render(frame, self);
+    }
+
+    fn execute_palette_command(&mut self, cmd: PaletteCommand) {
+        match cmd {
+            PaletteCommand::ExportCsv | PaletteCommand::ExportJson | PaletteCommand::ExportSql => {
+                if let Some(ref grid) = self.grid {
+                    let table = grid.table_name.clone();
+                    let columns = grid.columns.clone();
+                    let sort = grid.sort.clone();
+                    let filter = grid.filter.clone();
+                    let pool = Arc::clone(&self.pool);
+                    let tx = self.tx.clone();
+                    let format = match &cmd {
+                        PaletteCommand::ExportCsv => "csv",
+                        PaletteCommand::ExportJson => "json",
+                        PaletteCommand::ExportSql => "sql",
+                        _ => "csv",
+                    }
+                    .to_string();
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    let export_path = format!("{}/sqv_export.{}", home, format);
+                    let export_path_clone = export_path.clone();
+                    tokio::task::spawn(async move {
+                        let format_c = format.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
+                            let conn = pool.get()?;
+                            let path = std::path::Path::new(&export_path);
+                            match format_c.as_str() {
+                                "csv" => crate::export::export_csv(
+                                    &conn, &table, &columns, &filter, &sort, path,
+                                ),
+                                "json" => crate::export::export_json(
+                                    &conn, &table, &columns, &filter, &sort, path,
+                                ),
+                                "sql" => crate::export::export_sql(
+                                    &conn, &table, &columns, &filter, &sort, path,
+                                ),
+                                _ => Err(anyhow::anyhow!("unknown format")),
+                            }
+                        })
+                        .await;
+                        if let Ok(Ok(count)) = result {
+                            let _ = tx.send(Message::ExportDone {
+                                format,
+                                path: export_path_clone,
+                                count,
+                            });
+                        } else if let Ok(Err(e)) = result {
+                            let _ = tx.send(Message::EditFailed(e.to_string()));
+                        }
+                    });
+                }
+            }
+            PaletteCommand::SwitchTable(name) => {
+                let _ = self.tx.send(Message::OpenTable(name));
+            }
+            PaletteCommand::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+            }
+            PaletteCommand::ToggleReadonly => {
+                self.readonly = !self.readonly;
+                let msg = if self.readonly {
+                    "Read-only mode enabled"
+                } else {
+                    "Read-only mode disabled"
+                };
+                self.toast.push(msg, ToastKind::Info);
+            }
+            PaletteCommand::ResetColumnWidths => {
+                if let Some(ref mut grid) = self.grid {
+                    grid.manual_widths.clear();
+                    let avail = grid.avail_col_width;
+                    let sample_rows: Vec<Vec<SqlValue>> =
+                        grid.window.rows.iter().take(50).cloned().collect();
+                    grid.col_widths = crate::grid::layout::compute_col_widths(
+                        &grid.columns,
+                        &sample_rows,
+                        avail,
+                        &grid.manual_widths,
+                        &grid.fk_cols,
+                    );
+                }
+                self.toast.push("Column widths reset", ToastKind::Info);
+            }
+            PaletteCommand::ClearFilters => {
+                let _ = self.tx.send(Message::ClearFilters);
+                self.toast.push("Filters cleared", ToastKind::Info);
+            }
+            PaletteCommand::ReloadSchema => {
+                let _ = self.tx.send(Message::ReloadSchema);
+            }
+            PaletteCommand::CopyCell => {
+                let _ = self.tx.send(Message::CopyCell);
+            }
+            PaletteCommand::CopyRowJson => {
+                self.copy_row_as_json();
+            }
+            PaletteCommand::Quit => {
+                self.should_quit = true;
+            }
+            PaletteCommand::OpenDb => {
+                self.toast.push(
+                    "Use --path argument to open a different DB",
+                    ToastKind::Info,
+                );
+            }
+        }
+    }
+
+    fn copy_row_as_json(&self) {
+        let json = self.grid.as_ref().and_then(|g| {
+            let abs_row = g.focused_row as i64;
+            let row = g.window.get_row(abs_row)?;
+            let fields: Vec<String> = g
+                .columns
+                .iter()
+                .zip(row)
+                .map(|(col, val)| {
+                    let v_json = match val {
+                        SqlValue::Null => "null".to_string(),
+                        SqlValue::Integer(n) => n.to_string(),
+                        SqlValue::Real(f) => f.to_string(),
+                        SqlValue::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+                        SqlValue::Blob(_) => "null".to_string(),
+                    };
+                    format!("\"{}\": {}", col.name.replace('"', "\\\""), v_json)
+                })
+                .collect();
+            Some(format!("{{{}}}", fields.join(", ")))
+        });
+        if let Some(text) = json {
+            use std::io::Write;
+            let encoded = base64_encode(text.as_bytes());
+            let osc52 = format!("\x1b]52;c;{}\x07", encoded);
+            let _ = std::io::stdout().write_all(osc52.as_bytes());
+            let _ = std::io::stdout().flush();
+        }
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -1499,6 +1712,14 @@ impl App {
                 return;
             }
             AppMode::Browse => {}
+        }
+
+        // Ctrl-P / Ctrl-Shift-P opens command palette (checked after edit handling)
+        if (key.code == KeyCode::Char('p') || key.code == KeyCode::Char('P'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            let _ = self.tx.send(Message::OpenCommandPalette);
+            return;
         }
 
         match (key.code, key.modifiers) {
@@ -1732,6 +1953,34 @@ impl App {
                 }
                 KeyCode::Backspace if state.editing => {
                     state.edit_value.pop();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::CommandPalette(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    if let Some(cmd) = state.selected_command() {
+                        let _ = self.tx.send(Message::ClosePopup);
+                        let _ = self.tx.send(Message::ExecuteCommand(cmd));
+                    }
+                }
+                KeyCode::Up => {
+                    state.move_up();
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    state.move_down();
+                    self.dirty = true;
+                }
+                KeyCode::Char(c) => {
+                    state.push_char(c);
+                    self.dirty = true;
+                }
+                KeyCode::Backspace => {
+                    state.pop_char();
                     self.dirty = true;
                 }
                 _ => {}
@@ -2094,4 +2343,27 @@ impl App {
         self.active_tab = Some(current.checked_sub(1).unwrap_or(self.open_tabs.len() - 1));
         self.dirty = true;
     }
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(CHARS[(b0 >> 2) as usize] as char);
+        out.push(CHARS[((b0 & 0x3) << 4 | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((b1 & 0xf) << 2 | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
