@@ -134,8 +134,14 @@ pub fn render_sidebar(
     let border_color = if focused { theme.accent } else { theme.line };
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(Style::default().bg(theme.bg_soft))
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled("▌ SCHEMA", Style::default().fg(theme.fg_mute)));
+        .title(Span::styled(
+            "▌ SCHEMA",
+            Style::default()
+                .fg(if focused { theme.accent } else { theme.fg_mute })
+                .add_modifier(Modifier::BOLD),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -152,6 +158,7 @@ pub fn render_sidebar(
     let name_style = Style::default().fg(theme.fg_dim);
     let accent_style = Style::default()
         .fg(theme.accent)
+        .bg(theme.bg_raised)
         .add_modifier(Modifier::BOLD);
 
     let mut items: Vec<ListItem> = Vec::new();
@@ -204,7 +211,7 @@ pub fn render_sidebar(
 
     let list = List::new(items)
         .highlight_style(accent_style)
-        .highlight_symbol("▶ ");
+        .highlight_symbol("▸ ");
 
     frame.render_stateful_widget(list, inner, &mut state.list_state);
 }

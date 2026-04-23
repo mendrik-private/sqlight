@@ -1,8 +1,7 @@
 use ratatui::{
+    buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
     Frame,
 };
 
@@ -25,6 +24,10 @@ fn fmt_number(n: i64) -> String {
 }
 
 pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let table_name: String = app
         .active_tab
         .and_then(|i| app.open_tabs.get(i))
@@ -71,25 +74,17 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
 
     let theme = &app.theme;
 
-    let mut spans = vec![
-        Span::styled(
-            " BROWSE ",
-            Style::default()
-                .fg(theme.bg)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │ ", Style::default().fg(theme.line)),
-        Span::styled(
-            format!("{} ", table_name),
-            Style::default().fg(theme.fg_dim),
-        ),
-    ];
-
-    if !pos_str.is_empty() {
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(pos_str, Style::default().fg(theme.fg_mute)));
-    }
+    let filter_count = app
+        .grid
+        .as_ref()
+        .map(|g| {
+            g.filter
+                .columns
+                .values()
+                .map(|cf| cf.rules.iter().filter(|r| r.enabled).count())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
 
     let sort_str = app
         .grid
@@ -107,9 +102,42 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
         })
         .unwrap_or_default();
 
+    let mut segments: Vec<(String, Style)> = vec![
+        (
+            " BROWSE ".to_string(),
+            Style::default()
+                .fg(theme.bg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        (
+            table_name,
+            Style::default()
+                .fg(theme.fg_dim)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if filter_count > 0 {
+        segments.push((
+            format!("󰈲 {} filters", filter_count),
+            Style::default().fg(theme.red).bg(theme.bg_soft),
+        ));
+    }
+
     if !sort_str.is_empty() {
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(sort_str, Style::default().fg(theme.accent)));
+        segments.push((
+            sort_str,
+            Style::default().fg(theme.accent).bg(theme.bg_soft),
+        ));
+    }
+
+    if !pos_str.is_empty() {
+        segments.push((
+            pos_str,
+            Style::default().fg(theme.fg_mute).bg(theme.bg_soft),
+        ));
     }
 
     if !app.jump_stack.is_empty() {
@@ -121,22 +149,72 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
             .chain(std::iter::once(current_table))
             .collect::<Vec<_>>()
             .join(" › ");
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(
+        segments.push((
             format!("↩ {}", crumb),
-            Style::default().fg(theme.accent),
+            Style::default().fg(theme.accent).bg(theme.bg_soft),
         ));
     }
 
-    if !cell_preview.is_empty() {
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(
-            cell_preview,
-            Style::default().fg(theme.fg_dim),
-        ));
+    let buf = frame.buffer_mut();
+    buf.set_style(area, Style::default().bg(theme.bg_soft));
+
+    let preview = truncate_preview(&cell_preview, area.width as usize / 3);
+    let preview_width = preview.chars().count() as u16;
+    let preview_x = if preview.is_empty() {
+        area.x + area.width
+    } else {
+        area.x + area.width.saturating_sub(preview_width + 1)
+    };
+
+    let mut x = area.x;
+    for (idx, (text, style)) in segments.iter().enumerate() {
+        if x >= preview_x {
+            break;
+        }
+        x = put(buf, x, area.y, preview_x, text, *style);
+        if idx + 1 < segments.len() && x < preview_x {
+            x = put(
+                buf,
+                x,
+                area.y,
+                preview_x,
+                "  │  ",
+                Style::default().fg(theme.line).bg(theme.bg_soft),
+            );
+        }
     }
 
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line).style(Style::default().bg(theme.bg_soft));
-    frame.render_widget(paragraph, area);
+    if !preview.is_empty() && preview_x < area.x + area.width {
+        let _ = put(
+            buf,
+            preview_x,
+            area.y,
+            area.x + area.width,
+            &preview,
+            Style::default().fg(theme.fg).bg(theme.bg_soft),
+        );
+    }
+}
+
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    if s.chars().count() > max_chars && max_chars > 1 {
+        out.pop();
+        out.push('…');
+    }
+    out
+}
+
+fn put(buf: &mut Buffer, mut x: u16, y: u16, right: u16, text: &str, style: Style) -> u16 {
+    for ch in text.chars() {
+        if x >= right {
+            break;
+        }
+        buf.set_string(x, y, ch.to_string(), style);
+        x += 1;
+    }
+    x
 }

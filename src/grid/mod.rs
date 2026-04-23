@@ -654,13 +654,16 @@ fn render_vertical_scrollbar(buf: &mut Buffer, area: Rect, state: &GridState, th
         );
     }
 
-    let thumb_height = ((state.window.viewport_rows as i64 * track_height) / total.max(1)).max(1);
+    let thumb_height = ((state.window.viewport_rows as i64 * track_height) / total.max(1))
+        .max(1)
+        .min(track_height);
     let thumb_offset = if total > 1 {
         (state.focused_row as i64 * (track_height - thumb_height)) / (total - 1)
     } else {
         0
     };
-    let thumb_offset = thumb_offset.clamp(0, track_height - thumb_height);
+    let max_thumb_offset = (track_height - thumb_height).max(0);
+    let thumb_offset = thumb_offset.clamp(0, max_thumb_offset);
 
     for ty in 0..thumb_height {
         let ty_abs = track_y_start + (thumb_offset + ty) as u16;
