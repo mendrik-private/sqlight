@@ -1,8 +1,10 @@
 pub mod layout;
+pub mod virtual_scroll;
 
 use std::collections::HashMap;
 
 use ratatui::{
+    buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     Frame,
@@ -22,14 +24,15 @@ use crate::{
 pub struct GridState {
     pub table_name: String,
     pub columns: Vec<Column>,
-    pub rows: Vec<Vec<SqlValue>>,
-    pub total_rows: i64,
+    pub window: virtual_scroll::VirtualWindow,
     pub focused_row: usize,
     pub focused_col: usize,
     pub col_widths: Vec<u16>,
     pub h_scroll: usize,
     pub fk_cols: Vec<bool>,
     pub manual_widths: HashMap<usize, u16>,
+    pub needs_fetch: bool,
+    pub viewport_start: i64,
 }
 
 impl GridState {
@@ -52,14 +55,65 @@ impl GridState {
         Self {
             table_name,
             columns,
-            rows,
-            total_rows,
+            window: virtual_scroll::VirtualWindow::new(0, rows, total_rows),
             focused_row: 0,
             focused_col: 0,
             col_widths,
             h_scroll: 0,
             fk_cols: fk_cols_safe,
             manual_widths: HashMap::new(),
+            needs_fetch: false,
+            viewport_start: 0,
+        }
+    }
+
+    pub fn scroll_down(&mut self, n: usize) {
+        let max_row = (self.window.total_rows - 1).max(0);
+        let new_focused = (self.focused_row as i64 + n as i64).min(max_row);
+        self.focused_row = new_focused as usize;
+        self.adjust_viewport();
+        self.check_needs_fetch();
+    }
+
+    pub fn scroll_up(&mut self, n: usize) {
+        self.focused_row = self.focused_row.saturating_sub(n);
+        self.adjust_viewport();
+        self.check_needs_fetch();
+    }
+
+    pub fn scroll_to_row(&mut self, abs_row: i64) {
+        let max_row = (self.window.total_rows - 1).max(0);
+        self.focused_row = abs_row.clamp(0, max_row) as usize;
+        self.adjust_viewport();
+        self.check_needs_fetch();
+    }
+
+    pub fn scroll_to_end(&mut self) {
+        let max_row = (self.window.total_rows - 1).max(0) as usize;
+        self.focused_row = max_row;
+        self.adjust_viewport();
+        self.check_needs_fetch();
+    }
+
+    fn adjust_viewport(&mut self) {
+        let vp = self.window.viewport_rows.max(1);
+        let fr = self.focused_row as i64;
+        let total = self.window.total_rows;
+
+        if fr < self.viewport_start {
+            self.viewport_start = fr;
+        } else if fr >= self.viewport_start + vp as i64 {
+            self.viewport_start = fr - vp as i64 + 1;
+        }
+
+        self.viewport_start = self.viewport_start.max(0);
+        let max_start = (total - vp as i64).max(0);
+        self.viewport_start = self.viewport_start.min(max_start);
+    }
+
+    fn check_needs_fetch(&mut self) {
+        if !self.window.fetch_in_flight && self.window.needs_prefetch(self.focused_row as i64) {
+            self.needs_fetch = true;
         }
     }
 }
@@ -213,7 +267,7 @@ fn cell_val_style(val: &SqlValue, col: &Column, theme: &Theme, is_focused: bool)
 // ── sub-render functions ─────────────────────────────────────────────────────
 
 fn render_header(
-    buf: &mut ratatui::buffer::Buffer,
+    buf: &mut Buffer,
     area: Rect,
     gutter_width: u16,
     visible_cols: &[usize],
@@ -231,7 +285,6 @@ fn render_header(
         },
         header_style,
     );
-    // gutter
     let gutter_str = " ".repeat(gutter_width as usize);
     buf.set_string(area.x, header_y, &gutter_str, header_style);
 
@@ -256,13 +309,7 @@ fn render_header(
             ""
         };
 
-        // clear cell
-        buf.set_string(
-            col_x,
-            header_y,
-            " ".repeat(actual_w as usize),
-            header_style,
-        );
+        buf.set_string(col_x, header_y, " ".repeat(actual_w as usize), header_style);
 
         let badge_len = UnicodeWidthStr::width(badge);
         let max_name_w = (actual_w as usize).saturating_sub(badge_len + 2);
@@ -296,7 +343,7 @@ fn render_header(
 }
 
 fn render_data_rows(
-    buf: &mut ratatui::buffer::Buffer,
+    buf: &mut Buffer,
     area: Rect,
     gutter_width: u16,
     gutter_digits: usize,
@@ -304,16 +351,21 @@ fn render_data_rows(
     state: &GridState,
     theme: &Theme,
 ) {
-    for row_idx in 0..state.rows.len() {
-        let row_y = area.y + 1 + row_idx as u16;
+    let viewport_rows = state.window.viewport_rows;
+    for row_in_view in 0..viewport_rows {
+        let abs_row = state.viewport_start + row_in_view as i64;
+        if abs_row >= state.window.total_rows {
+            break;
+        }
+        let row_y = area.y + 1 + row_in_view as u16;
         if row_y >= area.y + area.height {
             break;
         }
 
-        let is_focused = row_idx == state.focused_row;
+        let is_focused = abs_row == state.focused_row as i64;
         let row_bg = if is_focused {
             Color::Rgb(0x2a, 0x23, 0x20)
-        } else if row_idx % 2 == 0 {
+        } else if abs_row % 2 == 0 {
             theme.bg
         } else {
             theme.bg_soft
@@ -329,8 +381,7 @@ fn render_data_rows(
             Style::default().bg(row_bg),
         );
 
-        // gutter
-        let row_num_str = format!("{:>width$} ", row_idx + 1, width = gutter_digits);
+        let row_num_str = format!("{:>width$} ", abs_row + 1, width = gutter_digits);
         let gutter_fg = if is_focused {
             theme.accent
         } else {
@@ -344,43 +395,59 @@ fn render_data_rows(
         );
 
         let mut col_x = area.x + gutter_width;
-        for &col_idx in visible_cols {
-            if col_x >= area.x + area.width {
-                break;
+
+        if let Some(row_data) = state.window.get_row(abs_row) {
+            for &col_idx in visible_cols {
+                if col_x >= area.x + area.width {
+                    break;
+                }
+                let col = &state.columns[col_idx];
+                let cell_w = state.col_widths[col_idx];
+                let actual_w = cell_w.min(area.x + area.width - col_x);
+                let inner_w = (actual_w as usize).saturating_sub(2);
+
+                let is_focused_cell = is_focused && col_idx == state.focused_col;
+
+                if let Some(val) = row_data.get(col_idx) {
+                    let (content, align) = format_cell_content(val, col, inner_w);
+                    let style = cell_val_style(val, col, theme, is_focused_cell).bg(row_bg);
+                    let display_w = UnicodeWidthStr::width(content.as_str());
+                    let content_x = match align {
+                        CellAlign::Left => col_x + 1,
+                        CellAlign::Right => col_x + 1 + inner_w.saturating_sub(display_w) as u16,
+                        CellAlign::Center => {
+                            col_x + 1 + (inner_w.saturating_sub(display_w) / 2) as u16
+                        }
+                    };
+                    buf.set_string(content_x, row_y, &content, style);
+                }
+
+                col_x += cell_w;
             }
-            let col = &state.columns[col_idx];
-            let cell_w = state.col_widths[col_idx];
-            let actual_w = cell_w.min(area.x + area.width - col_x);
-            let inner_w = (actual_w as usize).saturating_sub(2);
-
-            let is_focused_cell = is_focused && col_idx == state.focused_col;
-
-            if let Some(val) = state.rows[row_idx].get(col_idx) {
-                let (content, align) = format_cell_content(val, col, inner_w);
-                let style = cell_val_style(val, col, theme, is_focused_cell).bg(row_bg);
-                let display_w = UnicodeWidthStr::width(content.as_str());
-                let content_x = match align {
-                    CellAlign::Left => col_x + 1,
-                    CellAlign::Right => col_x + 1 + inner_w.saturating_sub(display_w) as u16,
-                    CellAlign::Center => col_x + 1 + (inner_w.saturating_sub(display_w) / 2) as u16,
-                };
-                buf.set_string(content_x, row_y, &content, style);
-            }
-
-            col_x += cell_w;
+        } else {
+            buf.set_string(
+                area.x + gutter_width,
+                row_y,
+                "…",
+                Style::default().fg(theme.fg_faint).bg(row_bg),
+            );
         }
     }
 }
 
 fn render_focused_border(
-    buf: &mut ratatui::buffer::Buffer,
+    buf: &mut Buffer,
     area: Rect,
     gutter_width: u16,
     visible_cols: &[usize],
     state: &GridState,
     theme: &Theme,
 ) {
-    let focused_row = state.focused_row;
+    let focused_row_in_view = state.focused_row as i64 - state.viewport_start;
+    if focused_row_in_view < 0 || focused_row_in_view >= state.window.viewport_rows as i64 {
+        return;
+    }
+    let focused_row_in_view = focused_row_in_view as usize;
     let focused_col = state.focused_col;
 
     let vis_pos = match visible_cols.iter().position(|&c| c == focused_col) {
@@ -388,7 +455,7 @@ fn render_focused_border(
         None => return,
     };
 
-    let cell_y = area.y + 1 + focused_row as u16;
+    let cell_y = area.y + 1 + focused_row_in_view as u16;
     if cell_y >= area.y + area.height {
         return;
     }
@@ -410,7 +477,6 @@ fn render_focused_border(
     let border_style = Style::default().fg(theme.accent);
     let right_x = cell_x + cell_w - 1;
 
-    // top border
     if cell_y > area.y {
         let ty = cell_y - 1;
         buf.set_string(cell_x, ty, "┌", border_style);
@@ -423,13 +489,11 @@ fn render_focused_border(
         }
     }
 
-    // left/right sides
     buf.set_string(cell_x, cell_y, "│", border_style);
     if right_x < area.x + area.width {
         buf.set_string(right_x, cell_y, "│", border_style);
     }
 
-    // bottom border
     let by = cell_y + 1;
     if by < area.y + area.height {
         buf.set_string(cell_x, by, "└", border_style);
@@ -443,12 +507,64 @@ fn render_focused_border(
     }
 }
 
+fn render_vertical_scrollbar(buf: &mut Buffer, area: Rect, state: &GridState, theme: &Theme) {
+    let total = state.window.total_rows;
+    if total <= 0 {
+        return;
+    }
+    let track_height = area.height.saturating_sub(1) as i64;
+    if track_height <= 0 {
+        return;
+    }
+    let track_x = area.x + area.width - 1;
+    let track_y_start = area.y + 1;
+
+    for ty in 0..track_height {
+        buf.set_string(
+            track_x,
+            track_y_start + ty as u16,
+            "│",
+            Style::default().fg(theme.line_soft),
+        );
+    }
+
+    let thumb_height = ((state.window.viewport_rows as i64 * track_height) / total.max(1)).max(1);
+    let thumb_offset = if total > 1 {
+        (state.focused_row as i64 * (track_height - thumb_height)) / (total - 1)
+    } else {
+        0
+    };
+    let thumb_offset = thumb_offset.clamp(0, track_height - thumb_height);
+
+    for ty in 0..thumb_height {
+        let ty_abs = track_y_start + (thumb_offset + ty) as u16;
+        if ty_abs < area.y + area.height {
+            buf.set_string(track_x, ty_abs, "█", Style::default().fg(theme.fg_dim));
+        }
+    }
+}
+
+fn render_loading_indicator(buf: &mut Buffer, area: Rect, state: &GridState, theme: &Theme) {
+    if !state.window.fetch_in_flight {
+        return;
+    }
+    let steps = area.height.saturating_sub(2) as u64;
+    if steps == 0 {
+        return;
+    }
+    let pos = (state.window.tick_count / 15) % steps;
+    let y = area.y + 1 + pos as u16;
+    if y < area.y + area.height {
+        buf.set_string(area.x, y, "●", Style::default().fg(theme.accent));
+    }
+}
+
 // ── public render entry point ────────────────────────────────────────────────
 
 pub fn render_grid(
     frame: &mut Frame,
     area: Rect,
-    state: &GridState,
+    state: &mut GridState,
     theme: &Theme,
     _config: &Config,
 ) {
@@ -456,11 +572,14 @@ pub fn render_grid(
         return;
     }
 
-    let gutter_digits = digits(state.total_rows.max(1));
+    let viewport_rows = area.height.saturating_sub(1) as usize;
+    state.window.viewport_rows = viewport_rows;
+
+    let gutter_digits = digits(state.window.total_rows.max(1));
     let gutter_width = (gutter_digits + 1) as u16;
+    // reserve 1 col on the right for the vertical scrollbar
     let data_width = area.width.saturating_sub(gutter_width).saturating_sub(1);
 
-    // Determine visible columns
     let mut visible_cols: Vec<usize> = Vec::new();
     let mut cumul = 0u16;
     for col_idx in state.h_scroll..state.col_widths.len() {
@@ -479,6 +598,17 @@ pub fn render_grid(
     if area.height >= 1 {
         render_header(buf, area, gutter_width, &visible_cols, state, theme);
     }
+
+    if state.window.total_rows == 0 && area.height >= 2 {
+        buf.set_string(
+            area.x + gutter_width,
+            area.y + 1,
+            "Empty table",
+            Style::default().fg(theme.fg_faint).bg(theme.bg),
+        );
+        return;
+    }
+
     if area.height >= 2 {
         render_data_rows(
             buf,
@@ -490,5 +620,7 @@ pub fn render_grid(
             theme,
         );
         render_focused_border(buf, area, gutter_width, &visible_cols, state, theme);
+        render_vertical_scrollbar(buf, area, state, theme);
+        render_loading_indicator(buf, area, state, theme);
     }
 }

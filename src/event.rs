@@ -11,7 +11,14 @@ pub fn translate_event(event: Event) -> Option<Message> {
                 Some(Message::Key(key))
             }
         }
-        Event::Mouse(mouse) => Some(Message::Mouse(mouse)),
+        Event::Mouse(mouse) => {
+            use crossterm::event::MouseEventKind;
+            match mouse.kind {
+                MouseEventKind::ScrollDown => Some(Message::ScrollDown(3)),
+                MouseEventKind::ScrollUp => Some(Message::ScrollUp(3)),
+                _ => Some(Message::Mouse(mouse)),
+            }
+        }
         Event::Resize(w, h) => Some(Message::Resize(w, h)),
         _ => None,
     }

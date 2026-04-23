@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         main_area
     };
 
-    if let Some(ref grid) = app.grid {
+    if let Some(ref mut grid) = app.grid {
         crate::grid::render_grid(frame, content_area, grid, &app.theme, &app.config);
     } else if let Some(active_idx) = app.active_tab {
         let tab = &app.open_tabs[active_idx];

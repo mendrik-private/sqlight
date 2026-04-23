@@ -57,6 +57,16 @@ pub enum Message {
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
     },
+    WindowReady {
+        table: String,
+        offset: i64,
+        rows: Vec<Vec<SqlValue>>,
+        total_rows: i64,
+    },
+    ScrollDown(usize),
+    ScrollUp(usize),
+    ScrollToRow(i64),
+    ScrollToEnd,
 }
 
 impl App {
@@ -92,7 +102,28 @@ impl App {
                 self.handle_key(key);
             }
             Message::Mouse(_ev) => {}
-            Message::Tick => {}
+            Message::Tick => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.window.tick_count = grid.window.tick_count.wrapping_add(1);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                    self.dirty = true;
+                }
+                if self.grid.as_ref().is_some_and(|g| g.window.fetch_in_flight) {
+                    self.dirty = true;
+                }
+            }
             Message::OpenTable(name) => self.open_table(name),
             Message::RowCountReady { table, count } => self.update_row_count(table, count),
             Message::CloseTab(idx) => self.close_tab(idx),
@@ -106,6 +137,112 @@ impl App {
                 rows,
                 total_rows,
             } => self.on_grid_data_ready(table, columns, fk_cols, rows, total_rows),
+            Message::WindowReady {
+                table,
+                offset,
+                rows,
+                total_rows,
+            } => {
+                if let Some(ref mut grid) = self.grid {
+                    if grid.table_name == table {
+                        grid.window.offset = offset;
+                        grid.window.rows = rows;
+                        grid.window.total_rows = total_rows;
+                        grid.window.fetch_in_flight = false;
+                        grid.needs_fetch = false;
+                        if total_rows > 0 {
+                            let max_row = (total_rows - 1) as usize;
+                            if grid.focused_row > max_row {
+                                grid.focused_row = max_row;
+                            }
+                        } else {
+                            grid.focused_row = 0;
+                        }
+                        let vp = grid.window.viewport_rows as i64;
+                        let max_start = (total_rows - vp).max(0);
+                        if grid.viewport_start > max_start {
+                            grid.viewport_start = max_start;
+                        }
+                    }
+                }
+                self.dirty = true;
+            }
+            Message::ScrollDown(n) => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.scroll_down(n);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::ScrollUp(n) => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.scroll_up(n);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::ScrollToRow(i) => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.scroll_to_row(i);
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
+            Message::ScrollToEnd => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.scroll_to_end();
+                    if grid.needs_fetch && !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        grid.needs_fetch = false;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        Some((grid.table_name.clone(), grid.columns.clone(), off, lim))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((table, cols, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, off, lim);
+                }
+                self.dirty = true;
+            }
         }
     }
 
@@ -143,8 +280,34 @@ impl App {
             }
             _ => match self.focus {
                 FocusPane::Sidebar => self.handle_sidebar_key(key),
-                FocusPane::Grid => {}
+                FocusPane::Grid => self.handle_grid_key(key),
             },
+        }
+    }
+
+    fn handle_grid_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let vp = self.grid.as_ref().map_or(20, |g| g.window.viewport_rows);
+        match key.code {
+            KeyCode::PageDown => {
+                let _ = self.tx.send(Message::ScrollDown(vp.saturating_sub(1)));
+            }
+            KeyCode::PageUp => {
+                let _ = self.tx.send(Message::ScrollUp(vp.saturating_sub(1)));
+            }
+            KeyCode::End => {
+                let _ = self.tx.send(Message::ScrollToEnd);
+            }
+            KeyCode::Home => {
+                let _ = self.tx.send(Message::ScrollToRow(0));
+            }
+            KeyCode::Down => {
+                let _ = self.tx.send(Message::ScrollDown(1));
+            }
+            KeyCode::Up => {
+                let _ = self.tx.send(Message::ScrollUp(1));
+            }
+            _ => {}
         }
     }
 
@@ -241,6 +404,33 @@ impl App {
                     table,
                     columns,
                     fk_cols,
+                    rows,
+                    total_rows,
+                });
+            }
+        });
+    }
+
+    fn spawn_window_fetch(&self, table: &str, columns: &[Column], offset: i64, limit: i64) {
+        let pool = Arc::clone(&self.pool);
+        let tx = self.tx.clone();
+        let table = table.to_string();
+        let columns = columns.to_vec();
+        tokio::task::spawn(async move {
+            let table_c = table.clone();
+            let result = tokio::task::spawn_blocking(
+                move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
+                    let conn = pool.get()?;
+                    let total = db::count_rows(&conn, &table_c)?;
+                    let rows = db::fetch_rows(&conn, &table_c, &columns, offset, limit)?;
+                    Ok((rows, total))
+                },
+            )
+            .await;
+            if let Ok(Ok((rows, total_rows))) = result {
+                let _ = tx.send(Message::WindowReady {
+                    table,
+                    offset,
                     rows,
                     total_rows,
                 });
