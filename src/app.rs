@@ -2576,7 +2576,18 @@ impl App {
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<GridFetchResult> {
                 let conn = pool.get()?;
                 let total = db::count_rows(&conn, &table_c, "", &[])?;
-                let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None, "", &[])?;
+                let rows = db::fetch_rows(
+                    &conn,
+                    db::RowFetch {
+                        table: &table_c,
+                        columns: &cols_c,
+                        offset: 0,
+                        limit: 50,
+                        order_by: None,
+                        where_clause: "",
+                        where_params: &[],
+                    },
+                )?;
                 let enumerated_values = cols_c
                     .iter()
                     .map(|col| {
@@ -2652,13 +2663,15 @@ impl App {
                     let order_by = sort.as_ref().map(|(s, b)| (s.as_str(), *b));
                     let rows = db::fetch_rows(
                         &conn,
-                        &table_c,
-                        &columns,
-                        offset,
-                        limit,
-                        order_by,
-                        &where_clause,
-                        &where_params,
+                        db::RowFetch {
+                            table: &table_c,
+                            columns: &columns,
+                            offset,
+                            limit,
+                            order_by,
+                            where_clause: &where_clause,
+                            where_params: &where_params,
+                        },
                     )?;
                     Ok((rows, total))
                 },

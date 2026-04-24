@@ -26,13 +26,15 @@ pub fn export_csv(
 
     let rows = crate::db::fetch_rows(
         conn,
-        table,
-        columns,
-        0,
-        i64::MAX,
-        order_ref,
-        &where_clause,
-        &where_params,
+        crate::db::RowFetch {
+            table,
+            columns,
+            offset: 0,
+            limit: i64::MAX,
+            order_by: order_ref,
+            where_clause: &where_clause,
+            where_params: &where_params,
+        },
     )?;
 
     let mut out = std::fs::File::create(path)?;
@@ -76,13 +78,15 @@ pub fn export_json(
 
     let rows = crate::db::fetch_rows(
         conn,
-        table,
-        columns,
-        0,
-        i64::MAX,
-        order_ref,
-        &where_clause,
-        &where_params,
+        crate::db::RowFetch {
+            table,
+            columns,
+            offset: 0,
+            limit: i64::MAX,
+            order_by: order_ref,
+            where_clause: &where_clause,
+            where_params: &where_params,
+        },
     )?;
 
     let mut out = std::fs::File::create(path)?;
@@ -126,13 +130,15 @@ pub fn export_sql(
 
     let rows = crate::db::fetch_rows(
         conn,
-        table,
-        columns,
-        0,
-        i64::MAX,
-        order_ref,
-        &where_clause,
-        &where_params,
+        crate::db::RowFetch {
+            table,
+            columns,
+            offset: 0,
+            limit: i64::MAX,
+            order_by: order_ref,
+            where_clause: &where_clause,
+            where_params: &where_params,
+        },
     )?;
 
     let mut out = std::fs::File::create(path)?;
