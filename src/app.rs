@@ -1972,6 +1972,9 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
             (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
                 let _ = self.tx.send(Message::UndoAction);
             }

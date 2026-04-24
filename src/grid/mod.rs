@@ -789,7 +789,10 @@ fn render_focused_border(
         return;
     }
 
-    let border_style = Style::default().fg(theme.accent);
+    let border_style = Style::default()
+        .fg(theme.accent)
+        .bg(theme.bg_raised)
+        .remove_modifier(Modifier::all());
     let right_x = cell_x + cell_w - 1;
 
     if cell_y >= area.y + HEADER_ROWS {

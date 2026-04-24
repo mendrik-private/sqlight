@@ -258,6 +258,7 @@ fn action_hint_text(app: &App) -> Option<String> {
     if app.sidebar_visible {
         hints.push("[ctrl-b] sidebar".to_string());
     }
+    hints.push("[ctrl-q] quit".to_string());
 
     if hints.is_empty() {
         None
