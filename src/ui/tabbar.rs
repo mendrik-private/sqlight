@@ -19,7 +19,7 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
 
     let theme = &app.theme;
     let buf = frame.buffer_mut();
-    buf.set_style(area, Style::default().bg(theme.bg_soft));
+    buf.set_style(area, Style::default().bg(theme.bg));
 
     let mut x = area.x;
     let right = area.x + area.width;
@@ -52,14 +52,22 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         };
         let badge_style = if is_active {
             Style::default()
-                .fg(theme.fg)
-                .bg(theme.line)
+                .fg(theme.bg)
+                .bg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg_dim).bg(theme.line_soft)
         };
 
-        let lead = if is_active { "▎ " } else { "  " };
+        x = put(
+            buf,
+            x,
+            area.y,
+            right,
+            "╭",
+            Style::default().fg(theme.line).bg(theme.bg),
+        );
+        let lead = if is_active { "▌ " } else { "  " };
         x = put(
             buf,
             x,
@@ -94,8 +102,8 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
             x,
             area.y,
             right,
-            "  ",
-            Style::default().bg(theme.bg_soft),
+            "╮ ",
+            Style::default().fg(theme.line).bg(theme.bg),
         );
     }
 }
@@ -118,16 +126,16 @@ pub fn hit_test(
         if cursor >= right {
             break;
         }
-        let lead_w = 2u16;
+        let lead_w = 3u16;
         let name_w = tab.table_name.chars().count() as u16;
         let badge_w = match tab.row_count {
             Some(count) => format!(" {} ", count).chars().count() as u16,
             None => 3,
         };
-        let tab_width = lead_w + name_w + 1 + badge_w + 1 + 1 + 2;
+        let tab_width = 1 + lead_w + name_w + 1 + badge_w + 1 + 1 + 2;
         let tab_end = cursor.saturating_add(tab_width).min(right);
         if x >= cursor && x < tab_end {
-            let close_x = cursor + lead_w + name_w + 1 + badge_w + 1;
+            let close_x = cursor + 1 + lead_w + name_w + 1 + badge_w + 1;
             if middle_click || x == close_x {
                 return Some(TabMouseAction::Close(idx));
             }

@@ -37,7 +37,7 @@ pub struct FilterRule {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FilterOp {
     Eq,
     Ne,
@@ -64,6 +64,45 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
+    pub fn next(self) -> Self {
+        let all = Self::all();
+        let idx = all.iter().position(|op| *op == self).unwrap_or(0);
+        all[(idx + 1) % all.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let all = Self::all();
+        let idx = all.iter().position(|op| *op == self).unwrap_or(0);
+        all[(idx + all.len() - 1) % all.len()]
+    }
+
+    fn all() -> &'static [Self] {
+        &[
+            Self::Eq,
+            Self::Ne,
+            Self::Lt,
+            Self::Le,
+            Self::Gt,
+            Self::Ge,
+            Self::Contains,
+            Self::NotContains,
+            Self::StartsWith,
+            Self::EndsWith,
+            Self::Like,
+            Self::Regex,
+            Self::IsNull,
+            Self::IsNotNull,
+            Self::Between,
+            Self::In,
+            Self::Today,
+            Self::ThisWeek,
+            Self::ThisMonth,
+            Self::ThisYear,
+            Self::LastNDays,
+            Self::Formula,
+        ]
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             FilterOp::Eq => "= (equals)",

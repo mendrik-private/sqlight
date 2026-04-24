@@ -35,6 +35,15 @@ fn cell_width(val: &SqlValue) -> u16 {
     }
 }
 
+fn percentile_width(mut widths: Vec<u16>, numerator: usize, denominator: usize) -> u16 {
+    if widths.is_empty() {
+        return 0;
+    }
+    widths.sort_unstable();
+    let idx = ((widths.len() - 1) * numerator) / denominator.max(1);
+    widths[idx]
+}
+
 pub fn compute_col_widths(
     columns: &[Column],
     rows: &[Vec<SqlValue>],
@@ -54,6 +63,7 @@ pub fn compute_col_widths(
     let mut min_w = vec![0u16; n];
     let mut is_text_col = vec![false; n];
     let mut cap_w = vec![0u16; n];
+    let mut stretch_target = vec![0u16; n];
 
     for (i, col) in columns.iter().enumerate() {
         if manual_widths.contains_key(&i) {
@@ -66,27 +76,54 @@ pub fn compute_col_widths(
         let tc = type_cap(col);
         cap_w[i] = tc;
 
-        let content_raw = rows
+        let sample_widths: Vec<u16> = rows
             .iter()
             .filter_map(|r| r.get(i))
             .map(cell_width)
-            .max()
-            .unwrap_or(0)
-            .min(tc);
-        let content_w = content_raw + 2;
+            .collect();
+        let content_max = sample_widths.iter().copied().max().unwrap_or(0).min(tc);
+        let content_relaxed = percentile_width(sample_widths.clone(), 3, 4).min(tc);
+        let content_median = percentile_width(sample_widths, 1, 2).min(tc);
+        let preferred_content_w = content_relaxed.max(content_median) + 2;
+        let stretch_content_w = content_max + 2;
 
+        let col_affinity = affinity(&col.col_type);
         let is_pk = col.is_pk;
         let is_fk = fk_cols.get(i).copied().unwrap_or(false);
-        let pk_fk_extra: u16 = if is_pk || is_fk { 1 } else { 0 };
-
-        let header_raw: u16 = col.name.len() as u16 + 3 + pk_fk_extra + 2;
-        let min_width_i = header_raw.max(6);
-        let preferred_i = content_w.max(min_width_i);
+        let name_width = UnicodeWidthStr::width(col.name.as_str()) as u16;
+        let numeric_or_fk = is_fk
+            || matches!(
+                col_affinity,
+                ColAffinity::Integer | ColAffinity::Real | ColAffinity::Numeric
+            );
+        let meta_label = if is_pk {
+            "INT key"
+        } else if is_fk {
+            "INT link"
+        } else {
+            match col_affinity {
+                ColAffinity::Integer => "INT",
+                ColAffinity::Real => "REAL",
+                ColAffinity::Text => "TXT",
+                ColAffinity::Blob => "BLOB",
+                ColAffinity::Numeric => "NUM",
+            }
+        };
+        let meta_width = UnicodeWidthStr::width(meta_label) as u16 + 2;
+        let header_name_w = name_width + 2;
+        let min_width_i = if numeric_or_fk {
+            meta_width.max(6)
+        } else {
+            header_name_w.max(meta_width).max(6)
+        };
+        let preferred_i = preferred_content_w.max(min_width_i);
+        let stretch_i = stretch_content_w.max(preferred_i);
 
         preferred[i] = preferred_i;
         min_w[i] = min_width_i;
+        stretch_target[i] = stretch_i;
 
-        is_text_col[i] = matches!(affinity(&col.col_type), ColAffinity::Text);
+        is_text_col[i] = matches!(col_affinity, ColAffinity::Text);
     }
 
     // Compute manual total and auto_avail
@@ -128,7 +165,7 @@ pub fn compute_col_widths(
                 0
             };
             let w = preferred[i] as u32 + extra;
-            let cap = (cap_w[i] as u32 + 2).max(preferred[i] as u32);
+            let cap = (stretch_target[i] as u32).max(preferred[i] as u32);
             result[i] = w.min(cap).min(u16::MAX as u32) as u16;
         }
     } else if total_min <= auto_avail32 {
@@ -194,14 +231,12 @@ mod tests {
             make_col("ab", "INTEGER", false),
             make_col("cd", "INTEGER", false),
         ];
-        // header_raw for "ab": 2+3+0+2 = 7, min=7, preferred=7
-        // header_raw for "cd": 2+3+0+2 = 7, min=7, preferred=7
-        // total_preferred = 14; avail = 14 -> case 1, slack=0
+        // Numeric columns can shrink to compact meta row width.
         let rows: Vec<Vec<SqlValue>> = vec![];
-        let result = compute_col_widths(&cols, &rows, 14, &HashMap::new(), &[]);
+        let result = compute_col_widths(&cols, &rows, 12, &HashMap::new(), &[]);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], 7);
-        assert_eq!(result[1], 7);
+        assert_eq!(result[0], 6);
+        assert_eq!(result[1], 6);
     }
 
     #[test]
@@ -277,12 +312,11 @@ mod tests {
 
     #[test]
     fn test_long_header_short_content() {
-        let cols = vec![make_col("very_long_column_name", "INTEGER", false)];
-        let rows = vec![vec![SqlValue::Integer(1)]];
+        let cols = vec![make_col("very_long_column_name", "TEXT", false)];
+        let rows = vec![vec![SqlValue::Text("x".to_string())]];
         let result = compute_col_widths(&cols, &rows, 200, &HashMap::new(), &[]);
         assert_eq!(result.len(), 1);
-        // header_raw = 21+3+0+2 = 26; min = 26; preferred = max(3, 26) = 26
-        assert!(result[0] >= 26, "width {} < 26", result[0]);
+        assert!(result[0] >= 23, "width {} < 23", result[0]);
     }
 
     #[test]
@@ -300,10 +334,8 @@ mod tests {
         ]];
         let result = compute_col_widths(&cols, &rows, 200, &HashMap::new(), &fk_cols);
         assert_eq!(result.len(), 3);
-        // id is PK -> pk_fk_extra=1; header_raw = 2+3+1+2 = 8; min = 8
-        assert!(result[0] >= 8, "id width {} < 8", result[0]);
-        // ref_id is FK -> pk_fk_extra=1; header_raw = 6+3+1+2 = 12; min = 12
-        assert!(result[2] >= 12, "ref_id width {} < 12", result[2]);
+        assert!(result[0] >= 7, "id width {} < 7", result[0]);
+        assert!(result[2] >= 10, "ref_id width {} < 10", result[2]);
     }
 
     #[test]

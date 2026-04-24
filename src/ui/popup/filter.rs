@@ -1,7 +1,7 @@
 use ratatui::{
     layout::Rect,
     style::Style,
-    widgets::{Block, Borders},
+    widgets::{block::BorderType, Block, Borders},
     Frame,
 };
 
@@ -51,6 +51,7 @@ pub fn render(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(format!(" Filter: {} ", state.col_name))
         .style(Style::default().bg(theme.bg_raised));

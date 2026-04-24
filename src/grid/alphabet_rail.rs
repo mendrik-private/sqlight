@@ -25,14 +25,14 @@ pub fn render_rail(frame: &mut Frame, area: Rect, state: &GridState, theme: &The
         return;
     }
 
-    let track_height = area.height.saturating_sub(1) as usize;
+    let track_height = area.height.saturating_sub(3) as usize;
     if track_height == 0 {
         return;
     }
 
     // Rail is 2 chars wide, to the left of the scrollbar (1 col)
     let rail_x = area.x + area.width.saturating_sub(RAIL_WIDTH + 1);
-    let rail_y_start = area.y + 1; // after header
+    let rail_y_start = area.y + 3; // after header and divider
 
     let letters: Vec<char> = std::iter::once('#').chain('A'..='Z').collect();
 

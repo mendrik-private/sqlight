@@ -51,6 +51,8 @@ pub struct GridState {
     pub filter: crate::filter::FilterSet,
 }
 
+const HEADER_ROWS: u16 = 3;
+
 impl GridState {
     pub fn new(
         table_name: String,
@@ -339,21 +341,35 @@ fn cell_val_style(val: &SqlValue, col: &Column, theme: &Theme, is_focused: bool)
                     Style::default().fg(theme.fg_faint)
                 }
             } else {
-                Style::default().fg(theme.fg)
+                Style::default().fg(theme.blue)
             }
         }
         SqlValue::Real(_) => Style::default().fg(theme.blue),
-        SqlValue::Text(_) => {
+        SqlValue::Text(text) => {
             if col_upper.contains("DATETIME")
                 || col_upper.contains("TIMESTAMP")
                 || col_upper.contains("DATE")
             {
-                Style::default().fg(theme.pink)
+                Style::default().fg(theme.pink).add_modifier(Modifier::DIM)
+            } else if looks_like_enum_value(text) {
+                Style::default().fg(theme.teal)
             } else {
-                Style::default().fg(theme.fg_dim)
+                Style::default()
+                    .fg(theme.fg_dim)
+                    .add_modifier(Modifier::DIM)
             }
         }
     }
+}
+
+fn looks_like_enum_value(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= 16
+        && !trimmed.chars().any(char::is_whitespace)
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
 }
 
 // ── sub-render functions ─────────────────────────────────────────────────────
@@ -368,12 +384,14 @@ fn render_header(
 ) {
     let header_y = area.y;
     let header_style = Style::default().bg(theme.bg_raised);
-    buf.set_string(
-        area.x,
-        header_y,
-        " ".repeat(area.width as usize),
-        header_style,
-    );
+    for y in 0..HEADER_ROWS.min(area.height) {
+        buf.set_string(
+            area.x,
+            header_y + y,
+            " ".repeat(area.width as usize),
+            header_style,
+        );
+    }
 
     let mut col_x = area.x + gutter_width;
     for &col_idx in visible_cols {
@@ -389,14 +407,21 @@ fn render_header(
         let is_pk = col.is_pk;
         let is_fk = state.fk_cols.get(col_idx).copied().unwrap_or(false);
         let pfx = if is_pk {
-            "K "
+            "key"
         } else if is_fk {
-            "F "
+            "link"
         } else {
             ""
         };
 
-        buf.set_string(col_x, header_y, " ".repeat(actual_w as usize), header_style);
+        for y in 0..HEADER_ROWS.min(area.height) {
+            buf.set_string(
+                col_x,
+                header_y + y,
+                " ".repeat(actual_w as usize),
+                header_style,
+            );
+        }
 
         let sort_arrow: Option<&str> = if let Some(s) = &state.sort {
             if s.col_idx == col_idx {
@@ -419,12 +444,8 @@ fn render_header(
             .is_some_and(|cf| cf.rules.iter().any(|r| r.enabled));
 
         let arrow_reserve = if sort_arrow.is_some() { 2usize } else { 0usize };
-        let filter_reserve = if filter_active { 2usize } else { 0usize };
-        let badge_len = UnicodeWidthStr::width(badge);
-        let max_name_w =
-            (actual_w as usize).saturating_sub(badge_len + 2 + arrow_reserve + filter_reserve);
-        let name_raw = format!(" {}{}", pfx, col.name);
-        let name_truncated = truncate_to_display_width(&name_raw, max_name_w);
+        let max_name_w = (actual_w as usize).saturating_sub(2 + arrow_reserve);
+        let name_truncated = truncate_to_display_width(&format!(" {}", col.name), max_name_w);
         buf.set_string(
             col_x,
             header_y,
@@ -435,24 +456,11 @@ fn render_header(
                 .add_modifier(Modifier::BOLD),
         );
 
-        let badge_x = col_x + actual_w - badge_len as u16 - 1;
-        if badge_x > col_x && badge_x < area.x + area.width {
-            buf.set_string(
-                badge_x,
-                header_y,
-                badge,
-                Style::default()
-                    .bg(theme.bg_raised)
-                    .fg(bcolor)
-                    .add_modifier(Modifier::DIM),
-            );
-        }
-
+        let sort_x = col_x + actual_w.saturating_sub(2);
         if let Some(arrow) = sort_arrow {
-            let arrow_x = badge_x.saturating_sub(2);
-            if arrow_x > col_x && arrow_x < area.x + area.width {
+            if sort_x > col_x && sort_x < area.x + area.width {
                 buf.set_string(
-                    arrow_x,
+                    sort_x,
                     header_y,
                     arrow,
                     Style::default().fg(theme.accent).bg(theme.bg_raised),
@@ -460,19 +468,54 @@ fn render_header(
             }
         }
 
-        if filter_active {
-            let filter_x = badge_x.saturating_sub((arrow_reserve + 2) as u16);
-            if filter_x > col_x && filter_x < area.x + area.width {
+        let meta_text = match (pfx.is_empty(), filter_active) {
+            (false, true) => format!("{badge} {pfx} ƒ"),
+            (false, false) => format!("{badge} {pfx}"),
+            (true, true) => format!("{badge} ƒ"),
+            (true, false) => badge.trim_end().to_string(),
+        };
+        let meta_truncated =
+            truncate_to_display_width(&format!(" {}", meta_text), actual_w as usize);
+        if HEADER_ROWS > 1 && header_y + 1 < area.y + area.height {
+            buf.set_string(
+                col_x,
+                header_y + 1,
+                &meta_truncated,
+                Style::default()
+                    .bg(theme.bg_raised)
+                    .fg(bcolor)
+                    .add_modifier(Modifier::DIM),
+            );
+        }
+
+        if col_x > area.x + gutter_width {
+            buf.set_string(
+                col_x,
+                header_y,
+                "│",
+                Style::default().fg(theme.line).bg(theme.bg_raised),
+            );
+            if HEADER_ROWS > 1 && header_y + 1 < area.y + area.height {
                 buf.set_string(
-                    filter_x,
-                    header_y,
-                    "F",
-                    Style::default().fg(theme.accent).bg(theme.bg_raised),
+                    col_x,
+                    header_y + 1,
+                    "│",
+                    Style::default().fg(theme.line).bg(theme.bg_raised),
                 );
             }
         }
 
         col_x += cell_w;
+    }
+
+    let divider_y = area.y + HEADER_ROWS - 1;
+    if divider_y < area.y + area.height {
+        buf.set_string(
+            area.x,
+            divider_y,
+            "─".repeat(area.width as usize),
+            Style::default().fg(theme.line).bg(theme.bg_raised),
+        );
     }
 
     if state.h_scroll + visible_cols.len() < state.col_widths.len() {
@@ -508,14 +551,14 @@ fn render_data_rows(
         if abs_row >= state.window.total_rows {
             break;
         }
-        let row_y = area.y + 1 + row_in_view as u16;
+        let row_y = area.y + HEADER_ROWS + row_in_view as u16;
         if row_y >= area.y + area.height {
             break;
         }
 
         let is_focused = abs_row == state.focused_row as i64;
         let row_bg = if is_focused {
-            Color::Rgb(0x2a, 0x23, 0x20)
+            theme.bg_raised
         } else if abs_row % 2 == 0 {
             theme.bg
         } else {
@@ -611,7 +654,7 @@ fn render_focused_border(
         None => return,
     };
 
-    let cell_y = area.y + 1 + focused_row_in_view as u16;
+    let cell_y = area.y + HEADER_ROWS + focused_row_in_view as u16;
     if cell_y >= area.y + area.height {
         return;
     }
@@ -633,7 +676,7 @@ fn render_focused_border(
     let border_style = Style::default().fg(theme.accent);
     let right_x = cell_x + cell_w - 1;
 
-    if cell_y > area.y {
+    if cell_y > area.y + HEADER_ROWS {
         let ty = cell_y - 1;
         buf.set_string(cell_x, ty, "┌", border_style);
         if cell_w > 2 {
@@ -668,12 +711,12 @@ fn render_vertical_scrollbar(buf: &mut Buffer, area: Rect, state: &GridState, th
     if total <= 0 {
         return;
     }
-    let track_height = area.height.saturating_sub(1) as i64;
+    let track_height = area.height.saturating_sub(HEADER_ROWS) as i64;
     if track_height <= 0 {
         return;
     }
     let track_x = area.x + area.width - 1;
-    let track_y_start = area.y + 1;
+    let track_y_start = area.y + HEADER_ROWS;
 
     for ty in 0..track_height {
         buf.set_string(
@@ -707,14 +750,15 @@ fn render_loading_indicator(buf: &mut Buffer, area: Rect, state: &GridState, the
     if !state.window.fetch_in_flight {
         return;
     }
-    let steps = area.height.saturating_sub(2) as u64;
+    let steps = area.height.saturating_sub(HEADER_ROWS + 1) as u64;
     if steps == 0 {
         return;
     }
     let pos = (state.window.tick_count / 15) % steps;
-    let y = area.y + 1 + pos as u16;
+    let y = area.y + HEADER_ROWS + pos as u16;
+    let x = area.x + area.width.saturating_sub(1);
     if y < area.y + area.height {
-        buf.set_string(area.x, y, "●", Style::default().fg(theme.accent));
+        buf.set_string(x, y, "•", Style::default().fg(theme.accent).bg(theme.bg));
     }
 }
 
@@ -731,7 +775,7 @@ pub fn render_grid(
         return;
     }
 
-    let viewport_rows = area.height.saturating_sub(1) as usize;
+    let viewport_rows = area.height.saturating_sub(HEADER_ROWS) as usize;
     state.window.viewport_rows = viewport_rows;
 
     let gutter_digits = digits(state.window.total_rows.max(1));
@@ -763,21 +807,21 @@ pub fn render_grid(
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::default().bg(theme.bg));
 
-    if area.height >= 1 {
+    if area.height >= HEADER_ROWS {
         render_header(buf, area, gutter_width, &visible_cols, state, theme);
     }
 
-    if state.window.total_rows == 0 && area.height >= 2 {
+    if state.window.total_rows == 0 && area.height > HEADER_ROWS {
         buf.set_string(
             area.x + gutter_width,
-            area.y + 1,
+            area.y + HEADER_ROWS,
             "Empty table",
             Style::default().fg(theme.fg_faint).bg(theme.bg),
         );
         return;
     }
 
-    if area.height >= 2 {
+    if area.height > HEADER_ROWS {
         render_data_rows(
             buf,
             area,
@@ -822,7 +866,7 @@ pub fn hit_test(area: Rect, state: &GridState, x: u16, y: u16) -> Option<GridHit
         return Some(GridHit::Scrollbar);
     }
 
-    if y == area.y {
+    if y < area.y + HEADER_ROWS {
         let col = hit_test_col(area, state, x, gutter_width, data_width)?;
         return Some(GridHit::Header(col));
     }
@@ -845,10 +889,10 @@ pub enum GridHit {
 }
 
 fn hit_test_row(area: Rect, state: &GridState, y: u16) -> Option<usize> {
-    if y <= area.y {
+    if y < area.y + HEADER_ROWS {
         return None;
     }
-    let row_in_view = (y - area.y - 1) as i64;
+    let row_in_view = (y - area.y - HEADER_ROWS) as i64;
     let abs_row = state.viewport_start + row_in_view;
     if abs_row < 0 || abs_row >= state.window.total_rows {
         None

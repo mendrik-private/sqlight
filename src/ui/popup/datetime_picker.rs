@@ -1,13 +1,24 @@
-use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
 use ratatui::{
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{block::BorderType, Block, Borders, Paragraph},
     Frame,
 };
 
 use crate::{db::types::SqlValue, theme::Theme};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatetimeFocus {
+    Day,
+    Month,
+    Year,
+    Calendar,
+    Hour,
+    Minute,
+    Second,
+}
 
 #[allow(dead_code)]
 pub struct DatetimePickerState {
@@ -20,7 +31,7 @@ pub struct DatetimePickerState {
     pub second: u8,
     pub view_month: NaiveDate,
     pub original: SqlValue,
-    pub focus_date: bool,
+    pub focus: DatetimeFocus,
     pub epoch_millis: bool,
 }
 
@@ -50,7 +61,7 @@ impl DatetimePickerState {
             (None, 0u8, 0u8, 0u8)
         };
         let base = date.unwrap_or_else(|| today.date());
-        let view_month = NaiveDate::from_ymd_opt(base.year(), base.month(), 1).unwrap_or(base);
+        let view_month = first_of_month(base).unwrap_or(base);
         Self {
             table,
             rowid,
@@ -61,29 +72,78 @@ impl DatetimePickerState {
             second,
             view_month,
             original,
-            focus_date: true,
+            focus: DatetimeFocus::Day,
             epoch_millis,
         }
     }
 
     pub fn prev_month(&mut self) {
-        let m = self.view_month.month();
-        let y = self.view_month.year();
-        self.view_month = if m == 1 {
-            NaiveDate::from_ymd_opt(y - 1, 12, 1).unwrap_or(self.view_month)
-        } else {
-            NaiveDate::from_ymd_opt(y, m - 1, 1).unwrap_or(self.view_month)
-        };
+        self.view_month = shift_month(self.view_month, -1);
+        self.sync_date_into_month();
     }
 
     pub fn next_month(&mut self) {
-        let m = self.view_month.month();
-        let y = self.view_month.year();
-        self.view_month = if m == 12 {
-            NaiveDate::from_ymd_opt(y + 1, 1, 1).unwrap_or(self.view_month)
-        } else {
-            NaiveDate::from_ymd_opt(y, m + 1, 1).unwrap_or(self.view_month)
+        self.view_month = shift_month(self.view_month, 1);
+        self.sync_date_into_month();
+    }
+
+    pub fn move_day(&mut self, delta: i64) {
+        let current = self.selected_date();
+        let next = current + Duration::days(delta);
+        self.date = Some(next);
+        self.view_month = first_of_month(next).unwrap_or(self.view_month);
+    }
+
+    pub fn focus_next(&mut self) {
+        self.focus = match self.focus {
+            DatetimeFocus::Day => DatetimeFocus::Month,
+            DatetimeFocus::Month => DatetimeFocus::Year,
+            DatetimeFocus::Year => DatetimeFocus::Calendar,
+            DatetimeFocus::Calendar => DatetimeFocus::Hour,
+            DatetimeFocus::Hour => DatetimeFocus::Minute,
+            DatetimeFocus::Minute => DatetimeFocus::Second,
+            DatetimeFocus::Second => DatetimeFocus::Day,
         };
+    }
+
+    pub fn focus_prev(&mut self) {
+        self.focus = match self.focus {
+            DatetimeFocus::Day => DatetimeFocus::Second,
+            DatetimeFocus::Month => DatetimeFocus::Day,
+            DatetimeFocus::Year => DatetimeFocus::Month,
+            DatetimeFocus::Calendar => DatetimeFocus::Year,
+            DatetimeFocus::Hour => DatetimeFocus::Calendar,
+            DatetimeFocus::Minute => DatetimeFocus::Hour,
+            DatetimeFocus::Second => DatetimeFocus::Minute,
+        };
+    }
+
+    pub fn adjust_focused(&mut self, delta: i32) {
+        match self.focus {
+            DatetimeFocus::Day => self.adjust_day(delta),
+            DatetimeFocus::Month => self.adjust_month(delta),
+            DatetimeFocus::Year => self.adjust_year(delta),
+            DatetimeFocus::Calendar => self.move_day(delta as i64),
+            DatetimeFocus::Hour => self.adjust_hour(delta),
+            DatetimeFocus::Minute => self.adjust_minute(delta),
+            DatetimeFocus::Second => self.adjust_second(delta),
+        }
+    }
+
+    pub fn calendar_left(&mut self) {
+        if self.focus == DatetimeFocus::Calendar {
+            self.move_day(-1);
+        }
+    }
+
+    pub fn calendar_right(&mut self) {
+        if self.focus == DatetimeFocus::Calendar {
+            self.move_day(1);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.date = None;
     }
 
     pub fn as_sql_value(&self) -> SqlValue {
@@ -112,11 +172,64 @@ impl DatetimePickerState {
             None => SqlValue::Null,
         }
     }
+
+    fn selected_date(&self) -> NaiveDate {
+        self.date.unwrap_or(self.view_month)
+    }
+
+    fn adjust_day(&mut self, delta: i32) {
+        let date = self.selected_date();
+        let max_day = days_in_month(date.year(), date.month());
+        let day = (date.day() as i32 + delta).clamp(1, max_day as i32) as u32;
+        self.date = NaiveDate::from_ymd_opt(date.year(), date.month(), day);
+        self.sync_date_into_month();
+    }
+
+    fn adjust_month(&mut self, delta: i32) {
+        let date = self.selected_date();
+        let shifted = shift_month(date, delta);
+        self.date = NaiveDate::from_ymd_opt(
+            shifted.year(),
+            shifted.month(),
+            date.day()
+                .min(days_in_month(shifted.year(), shifted.month())),
+        );
+        self.sync_date_into_month();
+    }
+
+    fn adjust_year(&mut self, delta: i32) {
+        let date = self.selected_date();
+        let year = date.year().saturating_add(delta);
+        self.date = NaiveDate::from_ymd_opt(
+            year,
+            date.month(),
+            date.day().min(days_in_month(year, date.month())),
+        );
+        self.sync_date_into_month();
+    }
+
+    fn adjust_hour(&mut self, delta: i32) {
+        self.hour = wrap_component(self.hour, delta, 24);
+    }
+
+    fn adjust_minute(&mut self, delta: i32) {
+        self.minute = wrap_component(self.minute, delta, 60);
+    }
+
+    fn adjust_second(&mut self, delta: i32) {
+        self.second = wrap_component(self.second, delta, 60);
+    }
+
+    fn sync_date_into_month(&mut self) {
+        if let Some(date) = self.date {
+            self.view_month = first_of_month(date).unwrap_or(self.view_month);
+        }
+    }
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &DatetimePickerState, theme: &Theme) {
-    let popup_width = 28u16.min(area.width);
-    let popup_height = 15u16.min(area.height);
+    let popup_width = 36u16.min(area.width);
+    let popup_height = 18u16.min(area.height);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect {
@@ -130,6 +243,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatetimePickerState, theme:
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(format!(" DateTime: {} ", state.col_name))
         .style(Style::default().bg(theme.bg_raised));
@@ -137,63 +251,160 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatetimePickerState, theme:
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let header = format!(" {:^24} ", state.view_month.format("%B %Y").to_string());
+    let selected = state.selected_date();
     let mut lines = vec![
-        Line::from(Span::styled(header, Style::default().fg(theme.accent))),
+        render_date_inputs(state, selected, theme),
+        divider(inner.width, theme),
         Line::from(Span::styled(
-            " Mo Tu We Th Fr Sa Su",
-            Style::default().fg(theme.fg_dim),
+            format!(" {:^30} ", state.view_month.format("%B %Y")),
+            Style::default().fg(theme.accent).bg(theme.bg_raised),
+        )),
+        Line::from(Span::styled(
+            " Mo Tue Wed Thu Fri Sat Sun",
+            Style::default().fg(theme.fg_dim).bg(theme.bg_raised),
         )),
     ];
-
-    let first_dow = state.view_month.weekday().num_days_from_monday();
-    let days_in_month = days_in_month(state.view_month.year(), state.view_month.month());
-    let today = chrono::Local::now().date_naive();
-
-    let mut day = 1u32;
-    let mut col = first_dow;
-    while day <= days_in_month {
-        let mut spans = Vec::new();
-        for c in 0..7 {
-            if (day == 1 && c < col) || day > days_in_month {
-                spans.push(Span::raw("   "));
-            } else {
-                let date =
-                    NaiveDate::from_ymd_opt(state.view_month.year(), state.view_month.month(), day);
-                let is_selected = state.date == date;
-                let is_today = date == Some(today);
-                let style = if is_selected {
-                    Style::default().fg(theme.bg).bg(theme.accent)
-                } else if is_today {
-                    Style::default().fg(theme.accent)
-                } else {
-                    Style::default().fg(theme.fg)
-                };
-                spans.push(Span::styled(format!("{:>2} ", day), style));
-                day += 1;
-            }
-        }
-        col = 0;
-        lines.push(Line::from(spans));
-    }
-
+    lines.extend(render_calendar_lines(state, theme));
+    lines.push(divider(inner.width, theme));
+    lines.push(render_time_inputs(state, theme));
+    lines.push(divider(inner.width, theme));
     lines.push(Line::from(Span::styled(
-        format!(
-            " Time: {:02}:{:02}:{:02}",
-            state.hour, state.minute, state.second
-        ),
-        Style::default().fg(theme.fg),
-    )));
-
-    lines.push(Line::from(Span::styled(
-        " ↵ ok · Esc cancel",
-        Style::default().fg(theme.fg_faint),
+        " Tab next · Shift-Tab prev · PgUp/PgDn month · Enter ok",
+        Style::default().fg(theme.fg_faint).bg(theme.bg_raised),
     )));
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme.bg_raised)),
         inner,
     );
+}
+
+fn render_date_inputs(
+    state: &DatetimePickerState,
+    selected: NaiveDate,
+    theme: &Theme,
+) -> Line<'static> {
+    Line::from(vec![
+        field_span(
+            "D",
+            &format!("{:02}", selected.day()),
+            state.focus == DatetimeFocus::Day,
+            theme,
+        ),
+        Span::raw("  "),
+        field_span(
+            "M",
+            &format!("{:02}", selected.month()),
+            state.focus == DatetimeFocus::Month,
+            theme,
+        ),
+        Span::raw("  "),
+        field_span(
+            "Y",
+            &format!("{:04}", selected.year()),
+            state.focus == DatetimeFocus::Year,
+            theme,
+        ),
+    ])
+}
+
+fn render_time_inputs(state: &DatetimePickerState, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        field_span(
+            "H",
+            &format!("{:02}", state.hour),
+            state.focus == DatetimeFocus::Hour,
+            theme,
+        ),
+        Span::raw("  "),
+        field_span(
+            "M",
+            &format!("{:02}", state.minute),
+            state.focus == DatetimeFocus::Minute,
+            theme,
+        ),
+        Span::raw("  "),
+        field_span(
+            "S",
+            &format!("{:02}", state.second),
+            state.focus == DatetimeFocus::Second,
+            theme,
+        ),
+    ])
+}
+
+fn field_span(label: &str, value: &str, focused: bool, theme: &Theme) -> Span<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(theme.bg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg).bg(theme.bg_soft)
+    };
+    Span::styled(format!("{label}:{value}"), style)
+}
+
+fn render_calendar_lines(state: &DatetimePickerState, theme: &Theme) -> Vec<Line<'static>> {
+    let first_dow = state.view_month.weekday().num_days_from_monday();
+    let days = days_in_month(state.view_month.year(), state.view_month.month());
+    let today = chrono::Local::now().date_naive();
+
+    let mut day = 1u32;
+    let mut col = first_dow;
+    let mut out = Vec::new();
+    while day <= days {
+        let mut spans = Vec::new();
+        for week_col in 0..7 {
+            if (day == 1 && week_col < col) || day > days {
+                spans.push(Span::styled("    ", Style::default().bg(theme.bg_raised)));
+            } else {
+                let date =
+                    NaiveDate::from_ymd_opt(state.view_month.year(), state.view_month.month(), day);
+                let style = if state.date == date && state.focus == DatetimeFocus::Calendar {
+                    Style::default()
+                        .fg(theme.bg)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else if state.date == date {
+                    Style::default().fg(theme.accent).bg(theme.bg_soft)
+                } else if date == Some(today) {
+                    Style::default().fg(theme.accent).bg(theme.bg_raised)
+                } else {
+                    Style::default().fg(theme.fg).bg(theme.bg_raised)
+                };
+                spans.push(Span::styled(format!("{:>3} ", day), style));
+                day += 1;
+            }
+        }
+        col = 0;
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+fn divider(width: u16, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(width as usize),
+        Style::default().fg(theme.line).bg(theme.bg_raised),
+    ))
+}
+
+fn wrap_component(value: u8, delta: i32, modulo: i32) -> u8 {
+    (value as i32 + delta).rem_euclid(modulo) as u8
+}
+
+fn first_of_month(date: NaiveDate) -> Option<NaiveDate> {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+}
+
+fn shift_month(date: NaiveDate, delta: i32) -> NaiveDate {
+    let base_month = date.month0() as i32 + delta;
+    let year = date.year() + base_month.div_euclid(12);
+    let month0 = base_month.rem_euclid(12) as u32;
+    let month = month0 + 1;
+    let day = date.day().min(days_in_month(year, month));
+    NaiveDate::from_ymd_opt(year, month, day).unwrap_or(date)
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {

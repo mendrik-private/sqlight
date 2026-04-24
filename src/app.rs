@@ -18,10 +18,11 @@ use crate::{
     theme::Theme,
     ui::{
         popup::{
-            CommandPaletteState, DatePickerState, DatetimePickerState, FilterPopupState,
-            FkPickerState, PaletteCommand, PopupKind, TextEditorState,
+            CommandPaletteState, DateFocus, DatePickerState, DatetimeFocus, DatetimePickerState,
+            FilterPopupState, FkPickerState, PaletteCommand, PopupKind, TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
+        tabbar::TabMouseAction,
         toast::{ToastKind, ToastState},
     },
 };
@@ -350,63 +351,11 @@ impl App {
                 self.dirty = true;
             }
             Message::ScrollDown(n) => {
-                let maybe_fetch = if let Some(ref mut grid) = self.grid {
-                    grid.scroll_down(n);
-                    if grid.needs_fetch && !grid.window.fetch_in_flight {
-                        grid.window.fetch_in_flight = true;
-                        grid.needs_fetch = false;
-                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        let sort = grid.sort.as_ref().and_then(|s| {
-                            grid.columns
-                                .get(s.col_idx)
-                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
-                        });
-                        Some((
-                            grid.table_name.clone(),
-                            grid.columns.clone(),
-                            sort,
-                            off,
-                            lim,
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
-                }
+                self.scroll_grid_down(n);
                 self.dirty = true;
             }
             Message::ScrollUp(n) => {
-                let maybe_fetch = if let Some(ref mut grid) = self.grid {
-                    grid.scroll_up(n);
-                    if grid.needs_fetch && !grid.window.fetch_in_flight {
-                        grid.window.fetch_in_flight = true;
-                        grid.needs_fetch = false;
-                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        let sort = grid.sort.as_ref().and_then(|s| {
-                            grid.columns
-                                .get(s.col_idx)
-                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
-                        });
-                        Some((
-                            grid.table_name.clone(),
-                            grid.columns.clone(),
-                            sort,
-                            off,
-                            lim,
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
-                }
+                self.scroll_grid_up(n);
                 self.dirty = true;
             }
             Message::ScrollToRow(i) => {
@@ -1704,10 +1653,28 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::{MouseButton, MouseEventKind};
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
         if self.popup.is_some() || matches!(self.mode, AppMode::Edit) {
             return;
+        }
+
+        let x = mouse.column;
+        let y = mouse.row;
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                if self.mouse_scroll_panel(x, y, 3, true) {
+                    self.dirty = true;
+                }
+                return;
+            }
+            MouseEventKind::ScrollUp => {
+                if self.mouse_scroll_panel(x, y, 3, false) {
+                    self.dirty = true;
+                }
+                return;
+            }
+            _ => {}
         }
 
         let middle_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Middle));
@@ -1716,8 +1683,22 @@ impl App {
             return;
         }
 
-        let x = mouse.column;
-        let y = mouse.row;
+        if self.tabbar_area.height > 0 {
+            if let Some(action) =
+                crate::ui::tabbar::hit_test(self.tabbar_area, self, x, y, middle_click)
+            {
+                self.focus = FocusPane::Grid;
+                match action {
+                    TabMouseAction::Activate(idx) => {
+                        let _ = self.tx.send(Message::ActivateTab(idx));
+                    }
+                    TabMouseAction::Close(idx) => {
+                        let _ = self.tx.send(Message::CloseTab(idx));
+                    }
+                }
+                return;
+            }
+        }
 
         if let Some(area) = self.sidebar_area {
             if self.sidebar_visible
@@ -1730,7 +1711,10 @@ impl App {
                 if left_click {
                     if let Some(action) = self.sidebar.click_at(area, &self.schema, x, y) {
                         match action {
-                            SidebarAction::OpenTable(name) => self.open_table(name),
+                            SidebarAction::OpenTable(name) => self.open_table_with_mode(
+                                name,
+                                mouse.modifiers.contains(KeyModifiers::SHIFT),
+                            ),
                             SidebarAction::Toggle => {}
                         }
                     }
@@ -1767,6 +1751,101 @@ impl App {
                     let _ = self.tx.send(Message::CycleSort);
                 }
             }
+        }
+    }
+
+    fn mouse_scroll_panel(&mut self, x: u16, y: u16, amount: usize, down: bool) -> bool {
+        if let Some(area) = self.sidebar_area {
+            if self.sidebar_visible
+                && x >= area.x
+                && x < area.x + area.width
+                && y >= area.y
+                && y < area.y + area.height
+            {
+                self.focus = FocusPane::Sidebar;
+                let viewport_rows = area.height.saturating_sub(2) as usize;
+                if down {
+                    self.sidebar
+                        .scroll_down(&self.schema, viewport_rows, amount);
+                } else {
+                    self.sidebar.scroll_up(&self.schema, viewport_rows, amount);
+                }
+                return true;
+            }
+        }
+
+        if let Some(area) = self.grid_outer_area.or(self.grid_inner_area) {
+            if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
+                self.focus = FocusPane::Grid;
+                if down {
+                    self.scroll_grid_down(amount);
+                } else {
+                    self.scroll_grid_up(amount);
+                }
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn scroll_grid_down(&mut self, n: usize) {
+        let maybe_fetch = if let Some(ref mut grid) = self.grid {
+            grid.scroll_down(n);
+            if grid.needs_fetch && !grid.window.fetch_in_flight {
+                grid.window.fetch_in_flight = true;
+                grid.needs_fetch = false;
+                let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                let sort = grid.sort.as_ref().and_then(|s| {
+                    grid.columns
+                        .get(s.col_idx)
+                        .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                });
+                Some((
+                    grid.table_name.clone(),
+                    grid.columns.clone(),
+                    sort,
+                    off,
+                    lim,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+            self.spawn_window_fetch(&table, &cols, sort, off, lim);
+        }
+    }
+
+    fn scroll_grid_up(&mut self, n: usize) {
+        let maybe_fetch = if let Some(ref mut grid) = self.grid {
+            grid.scroll_up(n);
+            if grid.needs_fetch && !grid.window.fetch_in_flight {
+                grid.window.fetch_in_flight = true;
+                grid.needs_fetch = false;
+                let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                let sort = grid.sort.as_ref().and_then(|s| {
+                    grid.columns
+                        .get(s.col_idx)
+                        .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                });
+                Some((
+                    grid.table_name.clone(),
+                    grid.columns.clone(),
+                    sort,
+                    off,
+                    lim,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+            self.spawn_window_fetch(&table, &cols, sort, off, lim);
         }
     }
 
@@ -1812,9 +1891,23 @@ impl App {
                 self.sidebar_visible = !self.sidebar_visible;
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
-                self.focus = match self.focus {
-                    FocusPane::Sidebar => FocusPane::Grid,
-                    FocusPane::Grid => FocusPane::Sidebar,
+                self.focus = if self.sidebar_visible {
+                    match self.focus {
+                        FocusPane::Sidebar => FocusPane::Grid,
+                        FocusPane::Grid => FocusPane::Sidebar,
+                    }
+                } else {
+                    FocusPane::Grid
+                };
+            }
+            (KeyCode::BackTab, _) => {
+                self.focus = if self.sidebar_visible {
+                    match self.focus {
+                        FocusPane::Sidebar => FocusPane::Grid,
+                        FocusPane::Grid => FocusPane::Sidebar,
+                    }
+                } else {
+                    FocusPane::Grid
                 };
             }
             _ => match self.focus {
@@ -1866,6 +1959,22 @@ impl App {
                     state.move_cursor_right();
                     self.dirty = true;
                 }
+                KeyCode::Up if state.is_multiline => {
+                    state.move_cursor_up();
+                    self.dirty = true;
+                }
+                KeyCode::Down if state.is_multiline => {
+                    state.move_cursor_down();
+                    self.dirty = true;
+                }
+                KeyCode::PageUp if state.is_multiline => {
+                    state.scroll_up(6);
+                    self.dirty = true;
+                }
+                KeyCode::PageDown if state.is_multiline => {
+                    state.scroll_down(6);
+                    self.dirty = true;
+                }
                 _ => {}
             },
             Some(PopupKind::ValuePicker(state)) => match key.code {
@@ -1912,19 +2021,43 @@ impl App {
                     self.dirty = true;
                 }
                 KeyCode::Left => {
-                    state.move_day(-1);
+                    if state.focus == DateFocus::Calendar {
+                        state.calendar_left();
+                    } else {
+                        state.focus_prev();
+                    }
                     self.dirty = true;
                 }
                 KeyCode::Right => {
-                    state.move_day(1);
+                    if state.focus == DateFocus::Calendar {
+                        state.calendar_right();
+                    } else {
+                        state.focus_next();
+                    }
                     self.dirty = true;
                 }
                 KeyCode::Up => {
-                    state.move_day(-7);
+                    if state.focus == DateFocus::Calendar {
+                        state.move_day(-7);
+                    } else {
+                        state.adjust_focused(1);
+                    }
                     self.dirty = true;
                 }
                 KeyCode::Down => {
-                    state.move_day(7);
+                    if state.focus == DateFocus::Calendar {
+                        state.move_day(7);
+                    } else {
+                        state.adjust_focused(-1);
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Tab => {
+                    state.focus_next();
+                    self.dirty = true;
+                }
+                KeyCode::BackTab => {
+                    state.focus_prev();
                     self.dirty = true;
                 }
                 KeyCode::Delete => {
@@ -1946,6 +2079,50 @@ impl App {
                 }
                 KeyCode::PageDown => {
                     state.next_month();
+                    self.dirty = true;
+                }
+                KeyCode::Left => {
+                    if state.focus == DatetimeFocus::Calendar {
+                        state.calendar_left();
+                    } else {
+                        state.focus_prev();
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Right => {
+                    if state.focus == DatetimeFocus::Calendar {
+                        state.calendar_right();
+                    } else {
+                        state.focus_next();
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Up => {
+                    if state.focus == DatetimeFocus::Calendar {
+                        state.move_day(-7);
+                    } else {
+                        state.adjust_focused(1);
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    if state.focus == DatetimeFocus::Calendar {
+                        state.move_day(7);
+                    } else {
+                        state.adjust_focused(-1);
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Tab => {
+                    state.focus_next();
+                    self.dirty = true;
+                }
+                KeyCode::BackTab => {
+                    state.focus_prev();
+                    self.dirty = true;
+                }
+                KeyCode::Delete => {
+                    state.clear();
                     self.dirty = true;
                 }
                 _ => {}
@@ -2004,14 +2181,28 @@ impl App {
                     self.dirty = true;
                 }
                 KeyCode::Up => {
-                    state.selected_rule = state.selected_rule.saturating_sub(1);
+                    if state.editing {
+                        state.edit_op = state.edit_op.prev();
+                    } else {
+                        state.selected_rule = state.selected_rule.saturating_sub(1);
+                    }
                     self.dirty = true;
                 }
                 KeyCode::Down => {
-                    if !state.col_filter.rules.is_empty() {
+                    if state.editing {
+                        state.edit_op = state.edit_op.next();
+                    } else if !state.col_filter.rules.is_empty() {
                         state.selected_rule =
                             (state.selected_rule + 1).min(state.col_filter.rules.len() - 1);
                     }
+                    self.dirty = true;
+                }
+                KeyCode::Left if state.editing => {
+                    state.edit_op = state.edit_op.prev();
+                    self.dirty = true;
+                }
+                KeyCode::Right if state.editing => {
+                    state.edit_op = state.edit_op.next();
                     self.dirty = true;
                 }
                 KeyCode::Char(' ') => {
@@ -2188,7 +2379,7 @@ impl App {
     }
 
     fn open_table(&mut self, name: String) {
-        self.open_table_with_mode(name, false);
+        self.open_table_with_mode(name, true);
     }
 
     fn open_table_with_mode(&mut self, name: String, new_tab: bool) {

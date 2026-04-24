@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{block::BorderType, Block, Borders, Paragraph},
     Frame,
 };
 
@@ -21,6 +21,7 @@ pub struct TextEditorState {
     pub json_mode: bool,
     pub valid: bool,
     pub readonly: bool,
+    pub scroll_y: u16,
 }
 
 impl TextEditorState {
@@ -63,6 +64,7 @@ impl TextEditorState {
             json_mode,
             valid: true,
             readonly,
+            scroll_y: 0,
         };
         state.validate();
         state
@@ -113,6 +115,29 @@ impl TextEditorState {
         }
     }
 
+    pub fn move_cursor_up(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if line > 0 {
+            self.cursor_pos = self.cursor_from_line_col(line - 1, col);
+        }
+    }
+
+    pub fn move_cursor_down(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if line + 1 < self.line_count() {
+            self.cursor_pos = self.cursor_from_line_col(line + 1, col);
+        }
+    }
+
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.scroll_y = self.scroll_y.saturating_sub(lines);
+    }
+
+    pub fn scroll_down(&mut self, lines: u16) {
+        let max_scroll = self.line_count().saturating_sub(1) as u16;
+        self.scroll_y = self.scroll_y.saturating_add(lines).min(max_scroll);
+    }
+
     fn validate(&mut self) {
         let upper = self.col_type.to_uppercase();
         if upper.contains("INT") {
@@ -148,6 +173,74 @@ impl TextEditorState {
             SqlValue::Text(self.current.clone())
         }
     }
+
+    fn line_count(&self) -> usize {
+        self.current.split('\n').count().max(1)
+    }
+
+    fn cursor_line(&self) -> usize {
+        self.current
+            .chars()
+            .take(self.cursor_pos)
+            .filter(|ch| *ch == '\n')
+            .count()
+    }
+
+    fn cursor_line_col(&self) -> (usize, usize) {
+        let before: String = self.current.chars().take(self.cursor_pos).collect();
+        let mut line = 0usize;
+        let mut col = 0usize;
+        for ch in before.chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+
+    fn cursor_from_line_col(&self, target_line: usize, target_col: usize) -> usize {
+        let lines: Vec<&str> = self.current.split('\n').collect();
+        let capped_line = target_line.min(lines.len().saturating_sub(1));
+        let mut pos = 0usize;
+        for line in lines.iter().take(capped_line) {
+            pos += line.chars().count() + 1;
+        }
+        let line_len = lines
+            .get(capped_line)
+            .map_or(0, |line| line.chars().count());
+        pos + target_col.min(line_len)
+    }
+
+    fn effective_scroll_y(&self, viewport_lines: usize) -> u16 {
+        let cursor_line = self.cursor_line();
+        let max_scroll = self.line_count().saturating_sub(viewport_lines) as u16;
+        let mut scroll_y = self.scroll_y.min(max_scroll);
+        if cursor_line < scroll_y as usize {
+            scroll_y = cursor_line as u16;
+        } else if cursor_line >= scroll_y as usize + viewport_lines {
+            scroll_y = (cursor_line + 1 - viewport_lines) as u16;
+        }
+        scroll_y
+    }
+
+    fn display_lines(&self) -> Vec<String> {
+        let before: String = self.current.chars().take(self.cursor_pos).collect();
+        let after: String = self.current.chars().skip(self.cursor_pos).collect();
+        let display = format!("{before}▌{after}");
+        display
+            .split('\n')
+            .map(|line| {
+                if line.is_empty() {
+                    " ".to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect()
+    }
 }
 
 pub fn render(
@@ -158,7 +251,7 @@ pub fn render(
     _config: &Config,
 ) {
     let popup_width = (area.width * 6 / 10).max(40).min(area.width);
-    let popup_height = if state.is_multiline { 10u16 } else { 5u16 };
+    let popup_height = if state.is_multiline { 14u16 } else { 5u16 };
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + area.height / 3;
     let popup_area = Rect {
@@ -172,6 +265,7 @@ pub fn render(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(format!(
             " {}: {} ",
@@ -183,13 +277,6 @@ pub fn render(
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let before: String = state.current.chars().take(state.cursor_pos).collect();
-    let after: String = state.current.chars().skip(state.cursor_pos).collect();
-    let display = format!("{}▌{}", before, after);
-
-    let input_style = Style::default().fg(theme.fg).bg(theme.bg_raised);
-    let hint_style = Style::default().fg(theme.fg_faint);
-
     let upper = state.col_type.to_uppercase();
     let show_validity = state.json_mode
         || upper.contains("INT")
@@ -197,39 +284,135 @@ pub fn render(
         || upper.contains("FLOAT")
         || upper.contains("DOUBLE");
 
-    let mut lines = vec![Line::from(Span::styled(
-        format!(" {} ", display),
-        input_style,
-    ))];
+    let sections = if state.is_multiline {
+        Layout::vertical([
+            Constraint::Length(if show_validity { 2 } else { 1 }),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner)
+    } else {
+        Layout::vertical([
+            Constraint::Length(if show_validity { 2 } else { 1 }),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner)
+    };
+
+    let input_style = Style::default().fg(theme.fg).bg(theme.bg_raised);
+    let hint_style = Style::default().fg(theme.fg_faint);
+
+    let mut status_lines = Vec::new();
+    if show_validity {
+        let vi = if state.valid { "✓" } else { "✗" };
+        let vc = if state.valid { theme.green } else { theme.red };
+        status_lines.push(Line::from(Span::styled(
+            format!(" {} ", vi),
+            Style::default().fg(vc).bg(theme.bg_raised),
+        )));
+    }
 
     if state.readonly {
-        lines.push(Line::from(Span::styled(
+        status_lines.push(Line::from(Span::styled(
             " ⊘ read-only",
             Style::default().fg(theme.red),
         )));
     }
-    lines.push(Line::from(Span::styled(
-        if state.is_multiline {
-            " Enter newline · Ctrl-Enter commit · Esc cancel"
-        } else {
-            " Enter commit · Esc cancel"
-        },
-        hint_style,
-    )));
-    if show_validity {
-        let vi = if state.valid { "✓" } else { "✗" };
-        let vc = if state.valid { theme.green } else { theme.red };
-        lines.insert(
-            0,
-            Line::from(Span::styled(
-                format!(" {} ", vi),
-                Style::default().fg(vc).bg(theme.bg_raised),
-            )),
+    frame.render_widget(
+        Paragraph::new(status_lines).style(Style::default().bg(theme.bg_raised)),
+        sections[0],
+    );
+
+    if state.is_multiline {
+        let editor_chunks =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(sections[1]);
+        let content_lines: Vec<Line<'static>> = state
+            .display_lines()
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, input_style)))
+            .collect();
+        let viewport_lines = editor_chunks[0].height.max(1) as usize;
+        let scroll_y = state.effective_scroll_y(viewport_lines);
+        frame.render_widget(
+            Paragraph::new(content_lines)
+                .style(Style::default().bg(theme.bg_raised))
+                .scroll((scroll_y, 0)),
+            editor_chunks[0],
+        );
+        render_scrollbar(
+            frame,
+            editor_chunks[1],
+            scroll_y as usize,
+            state.line_count(),
+            viewport_lines,
+            theme,
+        );
+    } else {
+        let display_lines = state.display_lines();
+        let line = display_lines
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "▌".to_string());
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(Span::styled(line, input_style))])
+                .style(Style::default().bg(theme.bg_raised)),
+            sections[1],
         );
     }
 
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.bg_raised)),
-        inner,
+        Paragraph::new(vec![Line::from(Span::styled(
+            if state.is_multiline {
+                " Enter newline · arrows move · PgUp/PgDn scroll · Esc cancel"
+            } else {
+                " Enter commit · Esc cancel"
+            },
+            hint_style,
+        ))])
+        .style(Style::default().bg(theme.bg_raised)),
+        sections[2],
     );
+}
+
+fn render_scrollbar(
+    frame: &mut Frame,
+    area: Rect,
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    let track_height = area.height as usize;
+    for row in 0..track_height {
+        buf.set_string(
+            area.x,
+            area.y + row as u16,
+            "│",
+            Style::default().fg(theme.line).bg(theme.bg_raised),
+        );
+    }
+    if total <= viewport || viewport == 0 {
+        return;
+    }
+    let thumb_height = ((viewport * track_height) / total).max(1).min(track_height);
+    let max_offset = total.saturating_sub(viewport);
+    let thumb_top = if max_offset == 0 {
+        0
+    } else {
+        ((offset.min(max_offset) * (track_height.saturating_sub(thumb_height))) / max_offset)
+            .min(track_height.saturating_sub(thumb_height))
+    };
+    for row in thumb_top..thumb_top + thumb_height {
+        buf.set_string(
+            area.x,
+            area.y + row as u16,
+            "█",
+            Style::default().fg(theme.accent).bg(theme.bg_raised),
+        );
+    }
 }

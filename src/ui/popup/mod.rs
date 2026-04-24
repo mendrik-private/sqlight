@@ -16,8 +16,8 @@ use ratatui::{
 use crate::{config::Config, theme::Theme};
 
 pub use command_palette::{CommandPaletteState, PaletteCommand};
-pub use date_picker::DatePickerState;
-pub use datetime_picker::DatetimePickerState;
+pub use date_picker::{DateFocus, DatePickerState};
+pub use datetime_picker::{DatetimeFocus, DatetimePickerState};
 pub use filter::FilterPopupState;
 pub use fk_picker::FkPickerState;
 pub use text_editor::TextEditorState;
@@ -35,6 +35,18 @@ pub enum PopupKind {
 }
 
 pub(crate) fn paint_popup_surface(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let shadow_area = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(1),
+        height: area.height.saturating_sub(1),
+    };
+    if shadow_area.width > 0 && shadow_area.height > 0 {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.line_soft)),
+            shadow_area,
+        );
+    }
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.bg_raised)),

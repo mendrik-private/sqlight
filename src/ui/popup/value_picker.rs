@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{block::BorderType, Block, Borders, Paragraph},
     Frame,
 };
 
@@ -87,15 +87,21 @@ impl ValuePickerState {
     }
 
     pub fn move_down(&mut self) {
-        let filtered = self.filtered_values();
-        if self.selected + 1 < filtered.len() {
+        let total = self.option_count();
+        if self.selected + 1 < total {
             self.selected += 1;
         }
     }
 
     pub fn selected_value(&self) -> Option<&str> {
+        if self.selected_custom() {
+            return Some(self.filter.as_str());
+        }
         let filtered = self.filtered_values();
-        filtered.get(self.selected).map(|(_, v, _)| *v)
+        let offset = usize::from(self.custom_value_available());
+        filtered
+            .get(self.selected.saturating_sub(offset))
+            .map(|(_, v, _)| *v)
     }
 
     pub fn push_filter_char(&mut self, ch: char) {
@@ -106,6 +112,31 @@ impl ValuePickerState {
     pub fn pop_filter_char(&mut self) {
         self.filter.pop();
         self.selected = 0;
+    }
+
+    fn custom_value_available(&self) -> bool {
+        !self.filter.trim().is_empty() && !self.values.iter().any(|value| value == &self.filter)
+    }
+
+    fn selected_custom(&self) -> bool {
+        self.custom_value_available() && self.selected == 0
+    }
+
+    fn option_count(&self) -> usize {
+        self.display_entries().len()
+    }
+
+    fn display_entries(&self) -> Vec<(String, Vec<usize>, bool)> {
+        let mut entries = Vec::new();
+        if self.custom_value_available() {
+            entries.push((self.filter.clone(), Vec::new(), true));
+        }
+        entries.extend(
+            self.filtered_values()
+                .into_iter()
+                .map(|(_, value, matched)| (value.to_string(), matched, false)),
+        );
+        entries
     }
 }
 
@@ -131,6 +162,7 @@ pub fn render(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .title(format!(" Pick: {} ", state.col_name))
         .style(Style::default().bg(theme.bg_raised));
@@ -138,22 +170,34 @@ pub fn render(
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let filter_line = Line::from(vec![
-        Span::styled(" Filter: ", Style::default().fg(theme.fg_dim)),
-        Span::styled(&state.filter, Style::default().fg(theme.fg)),
-        Span::styled("▌", Style::default().fg(theme.accent)),
+    let input_line = Line::from(vec![
+        Span::styled(" New/Search: ", Style::default().fg(theme.fg_dim)),
+        Span::styled(
+            format!(" {} ", state.filter),
+            Style::default().fg(theme.fg).bg(theme.bg_soft),
+        ),
+        Span::styled("▌", Style::default().fg(theme.accent).bg(theme.bg_soft)),
     ]);
 
-    let filtered = state.filtered_values();
-    let list_height = inner.height.saturating_sub(2) as usize;
+    let entries = state.display_entries();
+    let list_height = inner.height.saturating_sub(4) as usize;
     let start = if state.selected >= list_height {
         state.selected - list_height + 1
     } else {
         0
     };
 
-    let mut lines = vec![filter_line, Line::from("")];
-    for (rel_i, (_, val, matched)) in filtered.iter().skip(start).take(list_height).enumerate() {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " Type value here. Matching entries stay below.",
+            Style::default().fg(theme.fg_faint),
+        )),
+        input_line,
+        Line::from(""),
+    ];
+    for (rel_i, (val, matched, is_custom)) in
+        entries.iter().skip(start).take(list_height).enumerate()
+    {
         let abs_i = rel_i + start;
         let is_selected = abs_i == state.selected;
         let bg = if is_selected {
@@ -171,19 +215,30 @@ pub fn render(
         } else {
             spans.push(Span::styled("   ", Style::default().bg(bg)));
         }
-        for (ci, ch) in val.chars().enumerate() {
-            let style = if matched.contains(&ci) {
-                Style::default().fg(theme.accent).bg(bg)
-            } else {
-                Style::default().fg(theme.fg).bg(bg)
-            };
-            spans.push(Span::styled(ch.to_string(), style));
+        if *is_custom {
+            spans.push(Span::styled(
+                "Use new value: ",
+                Style::default().fg(theme.fg_dim).bg(bg),
+            ));
+            spans.push(Span::styled(
+                val.clone(),
+                Style::default().fg(theme.green).bg(bg),
+            ));
+        } else {
+            for (ci, ch) in val.chars().enumerate() {
+                let style = if matched.contains(&ci) {
+                    Style::default().fg(theme.accent).bg(bg)
+                } else {
+                    Style::default().fg(theme.fg).bg(bg)
+                };
+                spans.push(Span::styled(ch.to_string(), style));
+            }
         }
         lines.push(Line::from(spans));
     }
 
     lines.push(Line::from(Span::styled(
-        " ↵ select · esc cancel",
+        " ↵ select/add · text field above creates new entry · esc cancel",
         Style::default().fg(theme.fg_faint),
     )));
 

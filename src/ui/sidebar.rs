@@ -1,8 +1,9 @@
 use ratatui::{
-    layout::Rect,
+    buffer::Buffer,
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{block::BorderType, Block, Borders, List, ListItem, ListState},
     Frame,
 };
 
@@ -113,6 +114,14 @@ impl SidebarState {
         None
     }
 
+    pub fn scroll_down(&mut self, schema: &Schema, viewport_rows: usize, n: usize) {
+        self.scroll_by(schema, viewport_rows, n as isize);
+    }
+
+    pub fn scroll_up(&mut self, schema: &Schema, viewport_rows: usize, n: usize) {
+        self.scroll_by(schema, viewport_rows, -(n as isize));
+    }
+
     pub fn click_at(
         &mut self,
         area: Rect,
@@ -146,6 +155,32 @@ impl SidebarState {
         }
         self.list_state.select(Some(self.selected));
     }
+
+    fn scroll_by(&mut self, schema: &Schema, viewport_rows: usize, delta: isize) {
+        let total = self.visible_count(schema);
+        if total == 0 {
+            self.selected = 0;
+            self.list_state.select(Some(0));
+            *self.list_state.offset_mut() = 0;
+            return;
+        }
+
+        let viewport_rows = viewport_rows.max(1);
+        let max_offset = total.saturating_sub(viewport_rows);
+        let current_offset = self.list_state.offset() as isize;
+        let new_offset = (current_offset + delta).clamp(0, max_offset as isize) as usize;
+
+        let mut selected = self.selected.min(total - 1);
+        if selected < new_offset {
+            selected = new_offset;
+        } else if selected >= new_offset + viewport_rows {
+            selected = new_offset + viewport_rows - 1;
+        }
+
+        self.selected = selected;
+        self.list_state.select(Some(selected));
+        *self.list_state.offset_mut() = new_offset;
+    }
 }
 
 pub fn render_sidebar(
@@ -160,6 +195,7 @@ pub fn render_sidebar(
     let border_color = if focused { theme.accent } else { theme.line };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .style(Style::default().bg(theme.bg_soft))
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
@@ -171,6 +207,13 @@ pub fn render_sidebar(
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let content = if inner.width > 1 {
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(1)]).split(inner)
+    } else {
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(0)]).split(inner)
+    };
+    let list_area = content[0];
+    let scrollbar_area = content[1];
 
     let (table_icon, view_icon, index_icon) = if config.nerd_font {
         ("󰓫", "󰈈", "󰓹")
@@ -181,7 +224,9 @@ pub fn render_sidebar(
     let header_style = Style::default()
         .fg(theme.fg_mute)
         .add_modifier(Modifier::BOLD);
-    let name_style = Style::default().fg(theme.fg_dim);
+    let name_style = Style::default()
+        .fg(theme.fg_dim)
+        .add_modifier(Modifier::DIM);
     let accent_style = Style::default()
         .fg(theme.accent)
         .bg(theme.bg_raised)
@@ -239,5 +284,53 @@ pub fn render_sidebar(
         .highlight_style(accent_style)
         .highlight_symbol("▸ ");
 
-    frame.render_stateful_widget(list, inner, &mut state.list_state);
+    frame.render_stateful_widget(list, list_area, &mut state.list_state);
+    if scrollbar_area.width > 0 {
+        render_scrollbar(
+            frame.buffer_mut(),
+            scrollbar_area,
+            state.list_state.offset(),
+            state.visible_count(schema),
+            list_area.height as usize,
+            theme,
+        );
+    }
+}
+
+fn render_scrollbar(
+    buf: &mut Buffer,
+    area: Rect,
+    offset: usize,
+    total: usize,
+    viewport: usize,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 || total <= viewport || viewport == 0 {
+        return;
+    }
+
+    let track_height = area.height as usize;
+    let thumb_height = ((viewport * track_height) / total).max(1).min(track_height);
+    let max_offset = total.saturating_sub(viewport);
+    let thumb_top = if max_offset == 0 {
+        0
+    } else {
+        ((offset.min(max_offset) * (track_height.saturating_sub(thumb_height))) / max_offset)
+            .min(track_height.saturating_sub(thumb_height))
+    };
+
+    for row in 0..track_height {
+        let y = area.y + row as u16;
+        let style = if row >= thumb_top && row < thumb_top + thumb_height {
+            Style::default().fg(theme.accent).bg(theme.bg_soft)
+        } else {
+            Style::default().fg(theme.line).bg(theme.bg_soft)
+        };
+        let glyph = if row >= thumb_top && row < thumb_top + thumb_height {
+            "█"
+        } else {
+            "│"
+        };
+        buf.set_string(area.x, y, glyph, style);
+    }
 }

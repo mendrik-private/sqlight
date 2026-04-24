@@ -1,6 +1,7 @@
 pub mod popup;
 pub mod sidebar;
 pub mod statusbar;
+pub mod tabbar;
 pub mod toast;
 
 use crate::app::{App, FocusPane};
@@ -8,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::Span,
-    widgets::{Block, Paragraph},
+    widgets::{block::BorderType, Block, Paragraph},
     Frame,
 };
 
@@ -51,10 +52,24 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         main_area
     };
 
+    let content_vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if app.open_tabs.is_empty() { 0 } else { 1 }),
+            Constraint::Min(0),
+        ])
+        .split(content_area);
+    let tabbar_area = content_vertical[0];
+    let body_area = content_vertical[1];
+    app.tabbar_area = tabbar_area;
+
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(app.theme.bg)),
         content_area,
     );
+    if tabbar_area.height > 0 {
+        tabbar::render_tabbar(frame, tabbar_area, app);
+    }
 
     if let Some(ref mut grid) = app.grid {
         let border_color = if matches!(app.focus, FocusPane::Grid) {
@@ -88,6 +103,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
         let block = Block::bordered()
             .style(Style::default().bg(app.theme.bg))
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .title(Span::styled(
                 format!("▌ TABLE · {}", grid.table_name),
@@ -96,15 +112,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(meta, Style::default().fg(app.theme.fg_mute)));
-        let inner = block.inner(content_area);
-        app.grid_outer_area = Some(content_area);
+        let inner = block.inner(body_area);
+        app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
-        frame.render_widget(block, content_area);
+        frame.render_widget(block, body_area);
         crate::grid::render_grid(frame, inner, grid, &app.theme, &app.config);
     } else if let Some(active_idx) = app.active_tab {
         let tab = &app.open_tabs[active_idx];
         let block = Block::bordered()
             .style(Style::default().bg(app.theme.bg))
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(app.theme.line))
             .title(Span::styled(
                 format!("▌ TABLE · {}", tab.table_name),
@@ -112,10 +129,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
-        let inner = block.inner(content_area);
-        app.grid_outer_area = Some(content_area);
+        let inner = block.inner(body_area);
+        app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
-        frame.render_widget(block, content_area);
+        frame.render_widget(block, body_area);
         let msg = format!(" Loading {}...", tab.table_name);
         frame.render_widget(
             ratatui::widgets::Paragraph::new(msg)
@@ -125,6 +142,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         let block = Block::bordered()
             .style(Style::default().bg(app.theme.bg))
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(app.theme.line))
             .title(Span::styled(
                 "▌ TABLE",
@@ -132,10 +150,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                     .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
-        let inner = block.inner(content_area);
-        app.grid_outer_area = Some(content_area);
+        let inner = block.inner(body_area);
+        app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
-        frame.render_widget(block, content_area);
+        frame.render_widget(block, body_area);
     }
 
     if let Some(ref mut popup) = app.popup {
