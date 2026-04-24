@@ -15,6 +15,7 @@ use ratatui::{
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.screen_area = area;
     app.tabbar_area = Rect::default();
     app.sidebar_area = None;
     app.grid_outer_area = None;

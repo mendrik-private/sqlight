@@ -121,6 +121,7 @@ pub struct App {
     pub db_path: String,
     pub undo_stack: Vec<UndoFrame>,
     pub pending_confirm: Option<PendingConfirm>,
+    pub screen_area: Rect,
     pub tabbar_area: Rect,
     pub sidebar_area: Option<Rect>,
     pub grid_outer_area: Option<Rect>,
@@ -258,6 +259,7 @@ impl App {
             db_path,
             undo_stack: Vec::new(),
             pending_confirm: None,
+            screen_area: Rect::default(),
             tabbar_area: Rect::default(),
             sidebar_area: None,
             grid_outer_area: None,
@@ -1761,6 +1763,11 @@ impl App {
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        if matches!(self.popup, Some(PopupKind::FilterPopup(_))) {
+            self.handle_filter_popup_mouse(mouse);
+            return;
+        }
+
         if self.popup.is_some() || matches!(self.mode, AppMode::Edit) {
             return;
         }
@@ -1855,6 +1862,67 @@ impl App {
                 }
             }
         }
+    }
+
+    fn handle_filter_popup_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crate::ui::popup::filter::FilterPopupHit;
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        let mut apply = None;
+        {
+            let Some(PopupKind::FilterPopup(state)) = self.popup.as_mut() else {
+                return;
+            };
+            let Some(hit) = crate::ui::popup::filter::hit_test(
+                self.screen_area,
+                state,
+                mouse.column,
+                mouse.row,
+            ) else {
+                return;
+            };
+
+            match hit {
+                FilterPopupHit::RuleRow(index) => {
+                    state.set_selected_rule(index);
+                    state.focus_rule_list();
+                }
+                FilterPopupHit::RuleToggle(index) => {
+                    state.set_selected_rule(index);
+                    state.focus_rule_list();
+                    if state.toggle_selected_rule_enabled() {
+                        apply = Some((state.col_name.clone(), state.col_filter.clone()));
+                    }
+                }
+                FilterPopupHit::RuleDelete(index) => {
+                    state.set_selected_rule(index);
+                    if state.delete_selected_rule() {
+                        apply = Some((state.col_name.clone(), state.col_filter.clone()));
+                    }
+                    state.focus_rule_list();
+                }
+                FilterPopupHit::Operator => {
+                    state.focus_operator();
+                }
+                FilterPopupHit::OperatorChevron => {
+                    state.focus_operator();
+                    state.next_op();
+                }
+                FilterPopupHit::Value(offset) => {
+                    state.focus_value();
+                    state.set_cursor_from_display_x(offset);
+                }
+            }
+        }
+
+        if let Some((col_name, col_filter)) = apply {
+            self.apply_column_filter(col_name, col_filter);
+        }
+        self.dirty = true;
     }
 
     fn mouse_scroll_panel(&mut self, x: u16, y: u16, amount: usize, down: bool) -> bool {
@@ -2285,21 +2353,24 @@ impl App {
                     let mut apply = None;
                     {
                         if let Some(PopupKind::FilterPopup(state)) = self.popup.as_mut() {
-                            if state.focus == crate::ui::popup::filter::FilterPopupFocus::Delete {
-                                if state.delete_selected_rule() {
-                                    apply =
-                                        Some((state.col_name.clone(), state.col_filter.clone()));
+                            match state.focus {
+                                crate::ui::popup::filter::FilterPopupFocus::RuleList => {
+                                    state.focus_value();
                                 }
-                            } else {
-                                match state.add_rule() {
-                                    Ok(()) => {
-                                        apply = Some((
-                                            state.col_name.clone(),
-                                            state.col_filter.clone(),
-                                        ));
-                                    }
-                                    Err(message) => {
-                                        toast = Some(message);
+                                crate::ui::popup::filter::FilterPopupFocus::Operator => {
+                                    state.focus_value();
+                                }
+                                crate::ui::popup::filter::FilterPopupFocus::Value => {
+                                    match state.add_rule() {
+                                        Ok(()) => {
+                                            apply = Some((
+                                                state.col_name.clone(),
+                                                state.col_filter.clone(),
+                                            ));
+                                        }
+                                        Err(message) => {
+                                            toast = Some(message);
+                                        }
                                     }
                                 }
                             }
@@ -2314,39 +2385,87 @@ impl App {
                     }
                 }
                 KeyCode::Up => {
-                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Delete {
-                        state.select_prev_rule();
-                    } else {
-                        state.prev_op();
+                    match state.focus {
+                        crate::ui::popup::filter::FilterPopupFocus::RuleList => {
+                            state.select_prev_rule();
+                        }
+                        crate::ui::popup::filter::FilterPopupFocus::Operator => {
+                            state.prev_op();
+                        }
+                        crate::ui::popup::filter::FilterPopupFocus::Value => {
+                            state.prev_op();
+                        }
                     }
                     self.dirty = true;
                 }
                 KeyCode::Down => {
-                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Delete {
-                        state.select_next_rule();
-                    } else {
-                        state.next_op();
+                    match state.focus {
+                        crate::ui::popup::filter::FilterPopupFocus::RuleList => {
+                            state.select_next_rule();
+                        }
+                        crate::ui::popup::filter::FilterPopupFocus::Operator => {
+                            state.next_op();
+                        }
+                        crate::ui::popup::filter::FilterPopupFocus::Value => {
+                            state.next_op();
+                        }
                     }
                     self.dirty = true;
                 }
                 KeyCode::Left => {
-                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle {
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Value {
                         state.move_cursor_left();
                     }
                     self.dirty = true;
                 }
                 KeyCode::Right => {
-                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle {
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Value {
                         state.move_cursor_right();
                     }
                     self.dirty = true;
                 }
                 KeyCode::Tab => {
-                    state.toggle_focus();
+                    state.next_focus();
+                    self.dirty = true;
+                }
+                KeyCode::BackTab => {
+                    state.prev_focus();
+                    self.dirty = true;
+                }
+                KeyCode::Char(' ')
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::RuleList =>
+                {
+                    let apply = if state.toggle_selected_rule_enabled() {
+                        Some((state.col_name.clone(), state.col_filter.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some((col_name, col_filter)) = apply {
+                        self.apply_column_filter(col_name, col_filter);
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Char(' ')
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Operator =>
+                {
+                    state.next_op();
+                    self.dirty = true;
+                }
+                KeyCode::Delete | KeyCode::Backspace
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::RuleList =>
+                {
+                    let apply = if state.delete_selected_rule() {
+                        Some((state.col_name.clone(), state.col_filter.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some((col_name, col_filter)) = apply {
+                        self.apply_column_filter(col_name, col_filter);
+                    }
                     self.dirty = true;
                 }
                 KeyCode::Char(c)
-                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Value
                         && (key.modifiers == KeyModifiers::NONE
                             || key.modifiers == KeyModifiers::SHIFT) =>
                 {
@@ -2354,7 +2473,7 @@ impl App {
                     self.dirty = true;
                 }
                 KeyCode::Backspace
-                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle =>
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Value =>
                 {
                     state.pop_char();
                     self.dirty = true;

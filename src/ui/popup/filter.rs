@@ -1,7 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    widgets::{block::BorderType, Block, Borders},
+    text::{Line, Span},
+    widgets::{block::BorderType, Block, Borders, Paragraph},
     Frame,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -26,8 +27,33 @@ pub struct FilterPopupState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FilterPopupFocus {
-    Needle,
-    Delete,
+    RuleList,
+    Operator,
+    Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterPopupHit {
+    RuleRow(usize),
+    RuleToggle(usize),
+    RuleDelete(usize),
+    Operator,
+    OperatorChevron,
+    Value(u16),
+}
+
+#[derive(Clone, Copy)]
+struct FilterPopupLayout {
+    popup_area: Rect,
+    rule_list_area: Rect,
+    rule_rows_area: Rect,
+    divider_area: Rect,
+    editor_area: Rect,
+    operator_box: Rect,
+    operator_inner: Rect,
+    value_box: Rect,
+    value_inner: Rect,
+    footer_area: Rect,
 }
 
 impl FilterPopupState {
@@ -36,12 +62,13 @@ impl FilterPopupState {
         col_type: String,
         col_filter: crate::filter::ColumnFilter,
     ) -> Self {
+        let has_rules = !col_filter.rules.is_empty();
         let draft_op = col_filter
             .rules
             .last()
             .map(|rule| rule.op)
             .unwrap_or(crate::filter::FilterOp::Contains);
-        Self {
+        let mut state = Self {
             col_name,
             col_type,
             col_filter,
@@ -49,8 +76,14 @@ impl FilterPopupState {
             draft_op,
             draft_value: String::new(),
             draft_cursor_pos: 0,
-            focus: FilterPopupFocus::Needle,
-        }
+            focus: if has_rules {
+                FilterPopupFocus::RuleList
+            } else {
+                FilterPopupFocus::Value
+            },
+        };
+        state.sync_editor_from_selection();
+        state
     }
 
     pub fn next_op(&mut self) {
@@ -67,12 +100,14 @@ impl FilterPopupState {
 
     pub fn select_prev_rule(&mut self) {
         self.selected_rule = self.selected_rule.saturating_sub(1);
+        self.sync_editor_from_selection();
     }
 
     pub fn select_next_rule(&mut self) {
-        if self.selected_rule + 1 < self.col_filter.rules.len() {
+        if self.selected_rule < self.col_filter.rules.len() {
             self.selected_rule += 1;
         }
+        self.sync_editor_from_selection();
     }
 
     pub fn move_cursor_left(&mut self) {
@@ -115,33 +150,88 @@ impl FilterPopupState {
         self.draft_cursor_pos -= 1;
     }
 
-    pub fn toggle_focus(&mut self) {
+    pub fn next_focus(&mut self) {
         self.focus = match self.focus {
-            FilterPopupFocus::Needle if !self.col_filter.rules.is_empty() => {
-                FilterPopupFocus::Delete
-            }
-            _ => FilterPopupFocus::Needle,
+            FilterPopupFocus::RuleList => FilterPopupFocus::Operator,
+            FilterPopupFocus::Operator => FilterPopupFocus::Value,
+            FilterPopupFocus::Value => FilterPopupFocus::RuleList,
         };
+    }
+
+    pub fn prev_focus(&mut self) {
+        self.focus = match self.focus {
+            FilterPopupFocus::RuleList => FilterPopupFocus::Value,
+            FilterPopupFocus::Operator => FilterPopupFocus::RuleList,
+            FilterPopupFocus::Value => FilterPopupFocus::Operator,
+        };
+    }
+
+    pub fn focus_rule_list(&mut self) {
+        self.focus = FilterPopupFocus::RuleList;
+    }
+
+    pub fn focus_operator(&mut self) {
+        self.focus = FilterPopupFocus::Operator;
+    }
+
+    pub fn focus_value(&mut self) {
+        self.focus = FilterPopupFocus::Value;
+    }
+
+    pub fn set_selected_rule(&mut self, selected_rule: usize) {
+        self.selected_rule = selected_rule.min(self.col_filter.rules.len());
+        self.sync_editor_from_selection();
+    }
+
+    pub fn set_cursor_from_display_x(&mut self, display_x: u16) {
+        let mut width = 0u16;
+        let mut cursor = 0usize;
+        for ch in self.draft_value.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if width + ch_width > display_x {
+                break;
+            }
+            width += ch_width;
+            cursor += 1;
+        }
+        self.draft_cursor_pos = cursor;
     }
 
     pub fn delete_selected_rule(&mut self) -> bool {
         if self.selected_rule < self.col_filter.rules.len() {
             self.col_filter.rules.remove(self.selected_rule);
-            self.clamp_selection();
-            if self.col_filter.rules.is_empty() {
-                self.focus = FilterPopupFocus::Needle;
+            if !self.col_filter.rules.is_empty()
+                && self.selected_rule == self.col_filter.rules.len()
+            {
+                self.selected_rule = self.selected_rule.saturating_sub(1);
             }
+            self.clamp_selection();
+            self.sync_editor_from_selection();
+            return true;
+        }
+        false
+    }
+
+    pub fn toggle_selected_rule_enabled(&mut self) -> bool {
+        if let Some(rule) = self.col_filter.rules.get_mut(self.selected_rule) {
+            rule.enabled = !rule.enabled;
             return true;
         }
         false
     }
 
     pub fn add_rule(&mut self) -> Result<(), String> {
-        let rule = self.build_rule()?;
-        self.col_filter.rules.push(rule);
-        self.selected_rule = self.col_filter.rules.len().saturating_sub(1);
-        self.draft_value.clear();
-        self.draft_cursor_pos = 0;
+        let mut rule = self.build_rule()?;
+        if self.selected_rule < self.col_filter.rules.len() {
+            let existing = &self.col_filter.rules[self.selected_rule];
+            rule.enabled = existing.enabled;
+            rule.label = existing.label.clone();
+            self.col_filter.rules[self.selected_rule] = rule;
+        } else {
+            self.col_filter.rules.push(rule);
+            self.selected_rule = self.col_filter.rules.len().saturating_sub(1);
+        }
+        self.sync_editor_from_selection();
         Ok(())
     }
 
@@ -204,9 +294,103 @@ impl FilterPopupState {
     }
 
     fn clamp_selection(&mut self) {
-        if self.selected_rule >= self.col_filter.rules.len() {
-            self.selected_rule = self.col_filter.rules.len().saturating_sub(1);
+        let max_index = self.col_filter.rules.len();
+        if self.selected_rule > max_index {
+            self.selected_rule = max_index;
         }
+    }
+
+    pub fn is_new_rule_selected(&self) -> bool {
+        self.selected_rule >= self.col_filter.rules.len()
+    }
+
+    fn sync_editor_from_selection(&mut self) {
+        if let Some(rule) = self.col_filter.rules.get(self.selected_rule) {
+            if popup_ops().contains(&rule.op) {
+                self.draft_op = rule.op;
+            }
+            self.draft_value = draft_value(rule);
+            self.draft_cursor_pos = self.draft_value.chars().count();
+        } else {
+            self.draft_value.clear();
+            self.draft_cursor_pos = 0;
+            if !popup_ops().contains(&self.draft_op) {
+                self.draft_op = FilterOp::Contains;
+            }
+        }
+    }
+}
+
+fn popup_layout(area: Rect) -> FilterPopupLayout {
+    let popup_w = ((area.width * 3) / 4)
+        .max(60)
+        .min(area.width)
+        .saturating_sub(25)
+        .max(40)
+        .min(area.width);
+    let popup_h = ((area.height * 3) / 5)
+        .saturating_sub(6)
+        .max(12)
+        .min(area.height);
+    let popup_area = Rect {
+        x: area.x + (area.width.saturating_sub(popup_w)) / 2,
+        y: area.y + (area.height.saturating_sub(popup_h)) / 2,
+        width: popup_w,
+        height: popup_h,
+    };
+    let inner = inner_rect(popup_area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(7), Constraint::Length(3)])
+        .split(inner);
+    let body_width = chunks[0].width.saturating_sub(1);
+    let editor_width = ((body_width * 38) / 100)
+        .saturating_add(5)
+        .min(body_width.saturating_sub(20));
+    let rule_list_width = body_width.saturating_sub(editor_width);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(rule_list_width),
+            Constraint::Length(1),
+            Constraint::Length(editor_width),
+        ])
+        .split(chunks[0]);
+    let editor_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(2),
+        ])
+        .split(body[2]);
+
+    FilterPopupLayout {
+        popup_area,
+        rule_list_area: body[0],
+        rule_rows_area: Rect {
+            x: body[0].x,
+            y: body[0].y.saturating_add(2),
+            width: body[0].width,
+            height: body[0].height.saturating_sub(2),
+        },
+        divider_area: body[1],
+        editor_area: body[2],
+        operator_box: editor_chunks[1],
+        operator_inner: inner_rect(editor_chunks[1]),
+        value_box: editor_chunks[2],
+        value_inner: inner_rect(editor_chunks[2]),
+        footer_area: chunks[1],
+    }
+}
+
+fn inner_rect(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     }
 }
 
@@ -217,16 +401,8 @@ pub fn render(
     theme: &Theme,
     _config: &Config,
 ) {
-    let popup_w = (area.width * 7 / 10).max(50).min(area.width);
-    let popup_h = ((area.height * 2) / 5).max(9).min(area.height);
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-    let popup_area = Rect {
-        x,
-        y,
-        width: popup_w,
-        height: popup_h,
-    };
+    let layout = popup_layout(area);
+    let popup_area = layout.popup_area;
 
     super::paint_popup_surface(frame, popup_area, theme);
 
@@ -236,148 +412,85 @@ pub fn render(
         .border_style(Style::default().fg(theme.accent))
         .title(format!(" Filter: {} ", state.col_name))
         .style(Style::default().bg(theme.bg_raised));
-    let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    let editor_area = Rect { height: 3, ..inner };
-    let divider_y = inner.y + 3;
-    let rows_area = Rect {
-        y: inner.y + 4,
-        height: inner.height.saturating_sub(6),
-        ..inner
-    };
-    let footer_area = Rect {
-        y: inner.y + inner.height.saturating_sub(1),
-        height: 1,
-        ..inner
-    };
-
-    let intro = " Same-column rules use OR. Different columns use AND.";
-    frame.buffer_mut().set_string(
-        editor_area.x,
-        editor_area.y,
-        truncate(intro, editor_area.width as usize),
-        Style::default().fg(theme.fg_faint).bg(theme.bg_raised),
-    );
-
-    let op_line = format!(
-        " Operator: {}   (↑/↓ to change)",
-        popup_op_label(state.draft_op)
-    );
-    frame.buffer_mut().set_string(
-        editor_area.x,
-        editor_area.y + 1,
-        truncate(&op_line, editor_area.width as usize),
-        Style::default()
-            .fg(if state.focus == FilterPopupFocus::Needle {
-                theme.fg
-            } else {
-                theme.fg_dim
-            })
-            .bg(theme.bg_raised),
-    );
-
-    let needle_line = format!(" Needle: {}", state.display_draft_value());
-    frame.buffer_mut().set_string(
-        editor_area.x,
-        editor_area.y + 2,
-        truncate(&needle_line, editor_area.width as usize),
-        Style::default()
-            .fg(if state.focus == FilterPopupFocus::Needle {
-                theme.fg
-            } else {
-                theme.fg_dim
-            })
-            .bg(theme.bg_raised),
-    );
-
-    if divider_y < inner.y + inner.height {
+    for row in 0..layout.divider_area.height {
         frame.buffer_mut().set_string(
-            inner.x,
-            divider_y,
-            "─".repeat(inner.width as usize),
+            layout.divider_area.x,
+            layout.divider_area.y + row,
+            "│",
             Style::default().fg(theme.line).bg(theme.bg_raised),
         );
     }
 
-    if state.col_filter.rules.is_empty() {
-        frame.buffer_mut().set_string(
-            rows_area.x,
-            rows_area.y,
-            truncate(
-                " No rules yet. Press Enter to add the current operator + needle.",
-                rows_area.width as usize,
-            ),
-            Style::default().fg(theme.fg_faint).bg(theme.bg_raised),
-        );
+    render_rule_list(frame, layout.rule_list_area, state, theme);
+    render_editor(frame, &layout, state, theme);
+    render_footer(frame, layout.footer_area, state, theme);
+}
+
+pub fn hit_test(area: Rect, state: &FilterPopupState, x: u16, y: u16) -> Option<FilterPopupHit> {
+    let layout = popup_layout(area);
+    if x < layout.popup_area.x
+        || x >= layout.popup_area.x + layout.popup_area.width
+        || y < layout.popup_area.y
+        || y >= layout.popup_area.y + layout.popup_area.height
+    {
+        return None;
     }
 
-    for (i, rule) in state.col_filter.rules.iter().enumerate() {
-        let row_y = rows_area.y + i as u16;
-        if row_y >= rows_area.y + rows_area.height {
-            break;
+    if x >= layout.rule_rows_area.x
+        && x < layout.rule_rows_area.x + layout.rule_rows_area.width
+        && y >= layout.rule_rows_area.y
+        && y < layout.rule_rows_area.y + layout.rule_rows_area.height
+    {
+        let row_index = (y - layout.rule_rows_area.y) as usize;
+        if row_index > state.col_filter.rules.len() {
+            return None;
         }
-
-        let is_sel = i == state.selected_rule;
-        let bg = if is_sel {
-            theme.bg_soft
-        } else {
-            theme.bg_raised
-        };
-        let fg = if is_sel { theme.fg } else { theme.fg_dim };
-        let delete_label = if is_sel { "[x] delete" } else { "[x]" };
-        let delete_width = UnicodeWidthStr::width(delete_label);
-        let text_width = rows_area
-            .width
-            .saturating_sub(delete_width as u16)
-            .saturating_sub(1) as usize;
-
-        frame.buffer_mut().set_string(
-            rows_area.x,
-            row_y,
-            " ".repeat(rows_area.width as usize),
-            Style::default().bg(bg),
-        );
-        frame.buffer_mut().set_string(
-            rows_area.x,
-            row_y,
-            truncate(&format_rule(rule), text_width),
-            Style::default().fg(fg).bg(bg).add_modifier(if is_sel {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
-        );
-
-        let delete_x = rows_area
-            .x
-            .saturating_add(rows_area.width.saturating_sub(delete_width as u16));
-        frame.buffer_mut().set_string(
-            delete_x,
-            row_y,
-            delete_label,
-            Style::default()
-                .fg(if is_sel && state.focus == FilterPopupFocus::Delete {
-                    theme.red
-                } else {
-                    theme.fg_mute
-                })
-                .bg(bg)
-                .add_modifier(if is_sel && state.focus == FilterPopupFocus::Delete {
-                    Modifier::BOLD
-                } else {
-                    Modifier::DIM
-                }),
-        );
+        let is_new_row = row_index == state.col_filter.rules.len();
+        if !is_new_row {
+            if x < layout.rule_rows_area.x.saturating_add(3) {
+                return Some(FilterPopupHit::RuleToggle(row_index));
+            }
+            let actions_width = UnicodeWidthStr::width(" [x]") as u16;
+            let action_x = layout
+                .rule_rows_area
+                .x
+                .saturating_add(layout.rule_rows_area.width.saturating_sub(actions_width));
+            if x >= action_x && x < action_x.saturating_add(actions_width) {
+                return Some(FilterPopupHit::RuleDelete(row_index));
+            }
+        }
+        return Some(FilterPopupHit::RuleRow(row_index));
     }
 
-    let footer = " ↑/↓ operator  ←/→ cursor  tab needle/delete  enter add/delete  esc close";
-    frame.buffer_mut().set_string(
-        footer_area.x,
-        footer_area.y,
-        truncate(footer, footer_area.width as usize),
-        Style::default().fg(theme.fg_faint).bg(theme.bg_raised),
-    );
+    if x >= layout.operator_box.x
+        && x < layout.operator_box.x + layout.operator_box.width
+        && y >= layout.operator_box.y
+        && y < layout.operator_box.y + layout.operator_box.height
+    {
+        let chevron_x = layout
+            .operator_inner
+            .x
+            .saturating_add(layout.operator_inner.width.saturating_sub(1));
+        return Some(if x == chevron_x {
+            FilterPopupHit::OperatorChevron
+        } else {
+            FilterPopupHit::Operator
+        });
+    }
+
+    if x >= layout.value_box.x
+        && x < layout.value_box.x + layout.value_box.width
+        && y >= layout.value_box.y
+        && y < layout.value_box.y + layout.value_box.height
+    {
+        return Some(FilterPopupHit::Value(
+            x.saturating_sub(layout.value_inner.x),
+        ));
+    }
+
+    None
 }
 
 fn popup_ops() -> &'static [FilterOp] {
@@ -401,6 +514,22 @@ fn popup_op_label(op: FilterOp) -> &'static str {
     }
 }
 
+fn draft_value(rule: &FilterRule) -> String {
+    match &rule.value {
+        FilterValue::Literal(SqlValue::Null) => "NULL".to_string(),
+        FilterValue::Literal(SqlValue::Integer(n)) => n.to_string(),
+        FilterValue::Literal(SqlValue::Real(f)) => f.to_string(),
+        FilterValue::Literal(SqlValue::Text(s)) => s.clone(),
+        FilterValue::Literal(SqlValue::Blob(b)) => format!("<blob {} bytes>", b.len()),
+        FilterValue::Pattern(s) => s.clone(),
+        FilterValue::Regex(s) => s.clone(),
+        FilterValue::Range(_, _)
+        | FilterValue::List(_)
+        | FilterValue::Formula(_)
+        | FilterValue::N(_) => format_rule(rule),
+    }
+}
+
 fn format_rule(rule: &FilterRule) -> String {
     let value = match &rule.value {
         FilterValue::Literal(SqlValue::Null) => "NULL".to_string(),
@@ -416,6 +545,289 @@ fn format_rule(rule: &FilterRule) -> String {
         FilterValue::N(n) => n.to_string(),
     };
     format!("{} {}", popup_op_label(rule.op), value)
+}
+
+fn format_rule_summary(col_name: &str, rule: &FilterRule) -> String {
+    format!("{col_name} {}", format_rule(rule))
+}
+
+fn render_rule_list(frame: &mut Frame, area: Rect, state: &FilterPopupState, theme: &Theme) {
+    let buf = frame.buffer_mut();
+    let title = format!(" Rules in {} ", state.col_name);
+    buf.set_string(
+        area.x,
+        area.y,
+        truncate(&title, area.width as usize),
+        Style::default()
+            .fg(theme.fg_faint)
+            .bg(theme.bg_raised)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(2),
+        width: area.width,
+        height: area.height.saturating_sub(2),
+    };
+
+    for row in 0..rows_area.height {
+        let y = rows_area.y + row;
+        let row_index = row as usize;
+        let is_new_row = row_index == state.col_filter.rules.len();
+        if row_index > state.col_filter.rules.len() {
+            break;
+        }
+
+        let is_selected = row_index == state.selected_rule;
+        let is_active = is_selected && state.focus == FilterPopupFocus::RuleList;
+        let bg = if is_selected {
+            theme.bg_soft
+        } else {
+            theme.bg_raised
+        };
+        let base_style = Style::default()
+            .fg(if is_new_row {
+                theme.accent
+            } else if state
+                .col_filter
+                .rules
+                .get(row_index)
+                .is_some_and(|rule| rule.enabled)
+            {
+                if is_selected {
+                    theme.fg
+                } else {
+                    theme.fg_dim
+                }
+            } else {
+                theme.fg_mute
+            })
+            .bg(bg)
+            .add_modifier(if is_selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+
+        buf.set_string(
+            area.x,
+            y,
+            " ".repeat(area.width as usize),
+            Style::default().bg(bg),
+        );
+
+        let actions = if is_new_row { "" } else { " [x]" };
+        let actions_width = UnicodeWidthStr::width(actions);
+        let text_width = area.width.saturating_sub(actions_width as u16) as usize;
+        let text = if is_new_row {
+            "+ New rule".to_string()
+        } else if let Some(rule) = state.col_filter.rules.get(row_index) {
+            let checkbox = if rule.enabled { "[✓]" } else { "[ ]" };
+            format!("{checkbox} {}", format_rule_summary(&state.col_name, rule))
+        } else {
+            String::new()
+        };
+
+        buf.set_string(area.x, y, truncate(&text, text_width), base_style);
+        if !actions.is_empty() {
+            let action_x = area.x + area.width.saturating_sub(actions_width as u16);
+            buf.set_string(
+                action_x,
+                y,
+                actions,
+                Style::default()
+                    .fg(theme.red)
+                    .bg(bg)
+                    .add_modifier(if is_active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            );
+        }
+
+        if is_active {
+            buf.set_string(area.x, y, "▌", Style::default().fg(theme.accent).bg(bg));
+        }
+    }
+}
+
+fn render_editor(
+    frame: &mut Frame,
+    layout: &FilterPopupLayout,
+    state: &FilterPopupState,
+    theme: &Theme,
+) {
+    let area = layout.editor_area;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(2),
+        ])
+        .split(area);
+    let heading = if state.is_new_rule_selected() {
+        " New rule "
+    } else {
+        " Edit rule "
+    };
+    frame.buffer_mut().set_string(
+        area.x,
+        area.y,
+        truncate(heading, area.width as usize),
+        Style::default()
+            .fg(theme.fg_faint)
+            .bg(theme.bg_raised)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let op_border = if state.focus == FilterPopupFocus::Operator {
+        theme.accent
+    } else {
+        theme.line
+    };
+    let value_border = if state.focus == FilterPopupFocus::Value {
+        theme.accent
+    } else {
+        theme.line
+    };
+    let op_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(op_border).bg(theme.bg_soft))
+        .title(" operator ")
+        .style(Style::default().bg(theme.bg_soft));
+    let value_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(value_border).bg(theme.bg_soft))
+        .title(" value ")
+        .style(Style::default().bg(theme.bg_soft));
+    frame.render_widget(op_block, layout.operator_box);
+    frame.render_widget(value_block, layout.value_box);
+
+    frame.buffer_mut().set_string(
+        layout.operator_inner.x,
+        layout.operator_inner.y,
+        truncate(
+            &format!("{} ▾", popup_op_label(state.draft_op)),
+            layout.operator_inner.width as usize,
+        ),
+        Style::default()
+            .fg(if state.focus == FilterPopupFocus::Operator {
+                theme.fg
+            } else {
+                theme.fg_dim
+            })
+            .bg(theme.bg_soft),
+    );
+
+    let editor_value = if state.focus == FilterPopupFocus::Value {
+        state.display_draft_value()
+    } else {
+        state.draft_value.clone()
+    };
+    frame.buffer_mut().set_string(
+        layout.value_inner.x,
+        layout.value_inner.y,
+        truncate(&editor_value, layout.value_inner.width as usize),
+        Style::default()
+            .fg(if state.focus == FilterPopupFocus::Value {
+                theme.fg
+            } else {
+                theme.fg_dim
+            })
+            .bg(theme.bg_soft),
+    );
+
+    let status = if state.is_new_rule_selected() {
+        Line::from(vec![
+            Span::styled("Create", Style::default().fg(theme.accent)),
+            Span::styled(
+                " a new rule for this column.",
+                Style::default().fg(theme.fg_dim),
+            ),
+        ])
+    } else if state
+        .col_filter
+        .rules
+        .get(state.selected_rule)
+        .is_some_and(|rule| rule.enabled)
+    {
+        Line::from(vec![
+            Span::styled("Enabled", Style::default().fg(theme.green)),
+            Span::styled(
+                " rule. Space toggles it off.",
+                Style::default().fg(theme.fg_dim),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Disabled", Style::default().fg(theme.red)),
+            Span::styled(
+                " rule. Space toggles it on.",
+                Style::default().fg(theme.fg_dim),
+            ),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            status,
+            Line::from(vec![Span::styled(
+                "Tab moves between list, operator,",
+                Style::default().fg(theme.fg_faint),
+            )]),
+            Line::from(vec![Span::styled(
+                "and value.",
+                Style::default().fg(theme.fg_faint),
+            )]),
+        ])
+        .style(Style::default().bg(theme.bg_raised)),
+        chunks[3],
+    );
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, state: &FilterPopupState, theme: &Theme) {
+    frame.buffer_mut().set_string(
+        area.x,
+        area.y,
+        "─".repeat(area.width as usize),
+        Style::default().fg(theme.line).bg(theme.bg_raised),
+    );
+
+    let save_label = if state.is_new_rule_selected() {
+        "Enter add rule"
+    } else {
+        "Enter edit rule"
+    };
+    let action_line = Line::from(vec![
+        Span::styled("✓ ", Style::default().fg(theme.green)),
+        Span::styled(save_label, Style::default().fg(theme.green)),
+        Span::styled("  ·  ", Style::default().fg(theme.fg_faint)),
+        Span::styled("Space activate", Style::default().fg(theme.yellow)),
+        Span::styled("  ·  ", Style::default().fg(theme.fg_faint)),
+        Span::styled("Del remove", Style::default().fg(theme.red)),
+        Span::styled("  ·  ", Style::default().fg(theme.fg_faint)),
+        Span::styled("Esc close", Style::default().fg(theme.fg)),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            action_line,
+            Line::from(vec![Span::styled(
+                "Rules in this column use OR · different columns use AND.",
+                Style::default().fg(theme.fg_dim),
+            )]),
+        ])
+        .style(Style::default().bg(theme.bg_raised)),
+        Rect {
+            x: area.x,
+            y: area.y.saturating_add(1),
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        },
+    );
 }
 
 fn truncate(text: &str, max_width: usize) -> String {
@@ -441,11 +853,12 @@ fn truncate(text: &str, max_width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FilterPopupFocus, FilterPopupState};
+    use super::{hit_test, popup_layout, FilterPopupFocus, FilterPopupHit, FilterPopupState};
     use crate::{
         db::types::SqlValue,
         filter::{rule::FilterRule, ColumnFilter, FilterOp},
     };
+    use ratatui::layout::Rect;
 
     #[test]
     fn add_rule_parses_numeric_needles() {
@@ -490,7 +903,7 @@ mod tests {
             },
         );
         state.selected_rule = 1;
-        state.focus = FilterPopupFocus::Delete;
+        state.focus = FilterPopupFocus::RuleList;
 
         assert!(state.delete_selected_rule());
         assert_eq!(state.selected_rule, 0);
@@ -511,5 +924,125 @@ mod tests {
 
         assert_eq!(state.draft_value, "abc");
         assert_eq!(state.draft_cursor_pos, 2);
+    }
+
+    #[test]
+    fn selecting_existing_rule_loads_it_into_editor() {
+        let state = FilterPopupState::new(
+            "name".to_string(),
+            "TEXT".to_string(),
+            ColumnFilter {
+                rules: vec![FilterRule {
+                    op: FilterOp::Contains,
+                    value: crate::filter::FilterValue::Pattern("gon".to_string()),
+                    enabled: true,
+                    label: None,
+                }],
+            },
+        );
+
+        assert_eq!(state.draft_op, FilterOp::Contains);
+        assert_eq!(state.draft_value, "gon");
+        assert_eq!(state.draft_cursor_pos, 3);
+    }
+
+    #[test]
+    fn toggle_selected_rule_enabled_flips_state() {
+        let mut state = FilterPopupState::new(
+            "name".to_string(),
+            "TEXT".to_string(),
+            ColumnFilter {
+                rules: vec![FilterRule {
+                    op: FilterOp::Contains,
+                    value: crate::filter::FilterValue::Pattern("gon".to_string()),
+                    enabled: true,
+                    label: None,
+                }],
+            },
+        );
+
+        assert!(state.toggle_selected_rule_enabled());
+        assert!(!state.col_filter.rules[0].enabled);
+    }
+
+    #[test]
+    fn select_next_rule_can_reach_new_rule_row() {
+        let mut state = FilterPopupState::new(
+            "name".to_string(),
+            "TEXT".to_string(),
+            ColumnFilter {
+                rules: vec![FilterRule {
+                    op: FilterOp::Contains,
+                    value: crate::filter::FilterValue::Pattern("gon".to_string()),
+                    enabled: true,
+                    label: None,
+                }],
+            },
+        );
+
+        state.select_next_rule();
+
+        assert!(state.is_new_rule_selected());
+        assert_eq!(state.draft_value, "");
+    }
+
+    #[test]
+    fn add_rule_updates_selected_rule_when_editing_existing() {
+        let mut state = FilterPopupState::new(
+            "name".to_string(),
+            "TEXT".to_string(),
+            ColumnFilter {
+                rules: vec![FilterRule {
+                    op: FilterOp::Contains,
+                    value: crate::filter::FilterValue::Pattern("gon".to_string()),
+                    enabled: true,
+                    label: None,
+                }],
+            },
+        );
+        state.draft_op = FilterOp::Regex;
+        state.draft_value = "^g.*".to_string();
+        state.draft_cursor_pos = 4;
+
+        state.add_rule().expect("expected updated rule");
+
+        assert_eq!(state.col_filter.rules.len(), 1);
+        assert_eq!(state.col_filter.rules[0].op, FilterOp::Regex);
+    }
+
+    #[test]
+    fn hit_test_finds_checkbox_and_operator_chevron() {
+        let state = FilterPopupState::new(
+            "name".to_string(),
+            "TEXT".to_string(),
+            ColumnFilter {
+                rules: vec![FilterRule {
+                    op: FilterOp::Contains,
+                    value: crate::filter::FilterValue::Pattern("gon".to_string()),
+                    enabled: true,
+                    label: None,
+                }],
+            },
+        );
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let layout = popup_layout(area);
+        let checkbox_x = layout.rule_rows_area.x + 1;
+        let row_y = layout.rule_rows_area.y;
+        let chevron_x = layout.operator_inner.x + layout.operator_inner.width.saturating_sub(1);
+        let chevron_y = layout.operator_inner.y;
+
+        assert_eq!(
+            hit_test(area, &state, checkbox_x, row_y),
+            Some(FilterPopupHit::RuleToggle(0))
+        );
+        assert_eq!(
+            hit_test(area, &state, chevron_x, chevron_y),
+            Some(FilterPopupHit::OperatorChevron)
+        );
     }
 }
