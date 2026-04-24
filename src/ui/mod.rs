@@ -52,24 +52,31 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         main_area
     };
 
-    let content_vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if app.open_tabs.is_empty() { 0 } else { 1 }),
-            Constraint::Min(0),
-        ])
-        .split(content_area);
-    let tabbar_area = content_vertical[0];
-    let body_area = content_vertical[1];
+    let tabbar_height = if app.open_tabs.is_empty() {
+        0
+    } else {
+        content_area.height.min(3)
+    };
+    let tabbar_area = Rect {
+        x: content_area.x,
+        y: content_area.y,
+        width: content_area.width,
+        height: tabbar_height,
+    };
+    let body_area = Rect {
+        x: content_area.x,
+        y: content_area.y + tabbar_height.saturating_sub(1),
+        width: content_area.width,
+        height: content_area
+            .height
+            .saturating_sub(tabbar_height.saturating_sub(1)),
+    };
     app.tabbar_area = tabbar_area;
 
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(app.theme.bg)),
         content_area,
     );
-    if tabbar_area.height > 0 {
-        tabbar::render_tabbar(frame, tabbar_area, app);
-    }
 
     if let Some(ref mut grid) = app.grid {
         let border_color = if matches!(app.focus, FocusPane::Grid) {
@@ -105,34 +112,34 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             .style(Style::default().bg(app.theme.bg))
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
-            .title(Span::styled(
-                format!("▌ TABLE · {}", grid.table_name),
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
             .title_bottom(Span::styled(meta, Style::default().fg(app.theme.fg_mute)));
         let inner = block.inner(body_area);
         app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
         frame.render_widget(block, body_area);
+        render_right_frame_label(
+            frame,
+            body_area,
+            &format!(" TABLE - {} ", grid.table_name),
+            &app.theme,
+        );
         crate::grid::render_grid(frame, inner, grid, &app.theme, &app.config);
     } else if let Some(active_idx) = app.active_tab {
         let tab = &app.open_tabs[active_idx];
         let block = Block::bordered()
             .style(Style::default().bg(app.theme.bg))
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(app.theme.line))
-            .title(Span::styled(
-                format!("▌ TABLE · {}", tab.table_name),
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            .border_style(Style::default().fg(app.theme.line));
         let inner = block.inner(body_area);
         app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
         frame.render_widget(block, body_area);
+        render_right_frame_label(
+            frame,
+            body_area,
+            &format!(" TABLE - {} ", tab.table_name),
+            &app.theme,
+        );
         let msg = format!(" Loading {}...", tab.table_name);
         frame.render_widget(
             ratatui::widgets::Paragraph::new(msg)
@@ -143,17 +150,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         let block = Block::bordered()
             .style(Style::default().bg(app.theme.bg))
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(app.theme.line))
-            .title(Span::styled(
-                "▌ TABLE",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            .border_style(Style::default().fg(app.theme.line));
         let inner = block.inner(body_area);
         app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
         frame.render_widget(block, body_area);
+        render_right_frame_label(frame, body_area, " TABLE ", &app.theme);
+    }
+
+    if tabbar_area.height > 0 {
+        tabbar::render_tabbar(frame, tabbar_area, app);
     }
 
     if let Some(ref mut popup) = app.popup {
@@ -179,4 +185,31 @@ fn fmt_count(n: i64) -> String {
     } else {
         grouped
     }
+}
+
+fn render_right_frame_label(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    theme: &crate::theme::Theme,
+) {
+    if area.width <= 2 || area.height == 0 {
+        return;
+    }
+    let max_width = area.width.saturating_sub(4) as usize;
+    let trimmed: String = label.chars().take(max_width).collect();
+    let label_width = trimmed.chars().count() as u16;
+    if label_width == 0 {
+        return;
+    }
+    let x = area.x + area.width.saturating_sub(label_width + 2);
+    frame.buffer_mut().set_string(
+        x,
+        area.y,
+        trimmed,
+        Style::default()
+            .fg(theme.accent)
+            .bg(theme.bg)
+            .add_modifier(Modifier::BOLD),
+    );
 }

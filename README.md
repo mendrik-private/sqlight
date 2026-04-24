@@ -1,16 +1,48 @@
-# sqv — terminal SQLite viewer
+# sqv
 
-A fast, keyboard-first TUI SQLite browser written in Rust. Warm rose-pine-moon aesthetic, virtual scrolling over million-row tables, rich cell editing, foreign-key navigation, sorting, filtering, and export.
+**sqv** is a keyboard-first terminal viewer for SQLite databases. It is built for fast table browsing, in-place editing, filtering, sorting, and foreign-key navigation without leaving the terminal.
 
-![sqv screenshot showing filtered tracks table with alphabet rail](.github/screenshot.png)
+## Highlights
+
+- Fast virtual scrolling for large tables
+- Rich cell editors for text, enums, dates, datetimes, and foreign keys
+- Per-column filters, sorting, and alphabet jump navigation
+- Export current views to CSV, JSON, or SQL
+- Read-only mode for safe inspection
 
 ## Install
+
+### apt (GitHub Pages repository)
+
+The project publishes an `amd64` Debian package to a GitHub-hosted apt repository.
+
+```bash
+echo "deb [trusted=yes arch=amd64] https://mendrik-private.github.io/sqlight stable main" \
+  | sudo tee /etc/apt/sources.list.d/sqv.list
+sudo apt update
+sudo apt install sqv
+```
+
+`trusted=yes` is required because the repository is published from GitHub Pages without apt signing.
+
+### Release binary
+
+Download the latest Linux binary archive from GitHub Releases and install it into `/usr/local/bin`:
+
+```bash
+curl -fsSL -o sqv-linux-x86_64.tar.gz \
+  https://github.com/mendrik-private/sqlight/releases/latest/download/sqv-linux-x86_64.tar.gz
+tar -xzf sqv-linux-x86_64.tar.gz
+sudo install -m 0755 sqv /usr/local/bin/sqv
+```
+
+### From source
 
 ```bash
 cargo install --path .
 ```
 
-Or run directly:
+Or run directly from the checkout:
 
 ```bash
 cargo run --release -- path/to/database.db
@@ -18,14 +50,14 @@ cargo run --release -- path/to/database.db
 
 ## Usage
 
-```
+```text
 sqv <DB_PATH> [--readonly]
 sqv check-terminal
 ```
 
-- `DB_PATH` — path to a SQLite file, or `:memory:` for an empty in-memory DB
-- `--readonly` — open in read-only mode (disables all writes)
-- `check-terminal` — print detected terminal capabilities
+- `DB_PATH`: path to a SQLite database, or `:memory:`
+- `--readonly`: disable writes
+- `check-terminal`: print detected terminal capabilities
 
 ## Keybindings
 
@@ -37,98 +69,73 @@ sqv check-terminal
 | `Home` / `End` | First / last column in row |
 | `Ctrl-Home` / `Ctrl-End` | First / last cell in table |
 | `PgUp` / `PgDn` / `Ctrl-↑` / `Ctrl-↓` | Scroll one viewport |
-| `Mouse wheel` | Scroll 3 rows |
-| `Shift-wheel` | Scroll 3 columns |
+| `Mouse wheel` | Scroll rows |
+| `Shift-wheel` | Scroll columns |
 | `Click cell` | Focus cell |
-| `Click row number` | Select row |
-
-### Sidebar & Tabs
-
-| Key | Action |
-|-----|--------|
-| `Ctrl-b` | Toggle sidebar |
-| `Tab` | Cycle focus: sidebar ↔ grid |
-| `Enter` (sidebar) | Open table in new tab |
-| `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |
-| `x` / middle-click tab | Close tab |
-
-### Sorting & Filtering
-
-| Key | Action |
-|-----|--------|
-| `s` | Cycle sort on focused column: none → ↑ → ↓ |
-| `Click column header` | Cycle sort |
-| `f` | Open filter popup for focused column |
-| `Shift-F` | Open filter popup (all columns) |
-| `Ctrl-f` | Filter to rows like focused cell value |
-| `Letter key` (TEXT sort active) | Jump to first row starting with that letter |
 
 ### Editing
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Edit focused cell (opens appropriate popup) |
-| `Esc` | Cancel / close popup |
-| `Ctrl-Enter` | Commit edit (TEXT multiline) |
-| `i` | Insert new row |
-| `d` | Delete focused row (confirm with `y`) |
+| `Enter` | Edit focused cell / confirm picker |
+| `Esc` | Close popup |
+| `Ctrl-Enter` | Save the current cell edit |
+| `i` | Insert row |
+| `d` | Delete row |
 | `Ctrl-z` | Undo last write |
 
-### Foreign Keys
+### Filtering, sorting, and other actions
 
 | Key | Action |
 |-----|--------|
-| `j` | Jump to referenced row in target table |
-| `Enter` (FK cell) | Open FK picker popup |
-| `Backspace` | Pop jump stack (navigate back) |
-
-### Other
-
-| Key | Action |
-|-----|--------|
+| `s` | Cycle sort on focused column |
+| `f` | Open filter popup for focused column |
+| `Shift-F` | Clear filters |
+| `Ctrl-f` | Filter to rows like the focused cell |
+| `j` | Jump through a foreign key |
+| `Backspace` | Jump back |
+| `Ctrl-b` | Toggle sidebar |
 | `Ctrl-Shift-P` | Command palette |
-| `Right-click cell` | Context menu |
 | `Ctrl-Q` | Quit |
 
-## config.toml
+## Configuration
 
-Location: `$XDG_CONFIG_HOME/sqv/config.toml` (typically `~/.config/sqv/config.toml`)
+Configuration is read from:
+
+```text
+$XDG_CONFIG_HOME/sqv/config.toml
+```
+
+Example:
 
 ```toml
-# Use Nerd Font icons (table/view/index glyphs, PK/FK markers)
-# Set false if your terminal font lacks Nerd Font glyphs
 nerd_font = true
 ```
 
-## Column-sizing algorithm
+## Development
 
-Width computation runs on every viewport change, filter change, or sort change:
+### Local validation
 
-1. **Content width**: sample up to 200 rows in the current virtual window. Width = widest grapheme-measured cell, capped by type (TEXT→80, INT/REAL→20, DATE→10, DATETIME→19, BLOB→18, BOOL→1). Add 2 padding.
-2. **Header width**: column name + 3-char type badge + optional PK/FK glyph + 2 padding. Column minimum = `max(header_width, 6)`.
-3. Let `avail = viewport_cols - gutter_width - 1 (scrollbar)`.
-4. **Fits easily** (`total_content ≤ avail`): TEXT columns grow to content width first, then remaining slack distributed proportionally. Non-TEXT stay at content width.
-5. **Needs shrinking** (`total_content > avail` but `total_min ≤ avail`): start every column at minimum, distribute remaining space proportionally with TEXT columns getting **2× weight** — this keeps text readable while numerics shrink to minimum.
-6. **Overflows** (`total_min > avail`): every column at minimum, enable horizontal scrollbar.
-
-Columns have hysteresis: recompute only when new width differs by ≥ 3 cells to avoid jitter during vertical scrolling. User-resized columns (`Ctrl-←/→` or drag) are pinned until `=` resets them.
-
-## Export
-
-From the command palette (`Ctrl-Shift-P`):
-
-- **Export CSV** → `~/sqv_export.csv`
-- **Export JSON** → `~/sqv_export.json`
-- **Export SQL** → `~/sqv_export.sql` (INSERT statements)
-
-All exports respect the current filter and sort.
-
-## Filter persistence
-
-Filters are saved per `(database_path, table_name)` at:
-
-```
-$XDG_STATE_HOME/sqv/filters/<db_basename>/<table_name>.toml
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
 ```
 
-They survive across sessions and are loaded automatically when you open a table.
+### Release pipeline
+
+GitHub Actions provides:
+
+1. **CI** on pushes and pull requests: format check, clippy, and tests
+2. **Tagged releases** on `v*` tags:
+   - build the release binary
+   - build a Debian package
+   - publish GitHub Release assets
+   - publish an apt repository to GitHub Pages
+
+To cut a release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```

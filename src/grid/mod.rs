@@ -33,11 +33,23 @@ pub struct SortSpec {
     pub direction: SortDir,
 }
 
+pub struct GridInit {
+    pub table_name: String,
+    pub columns: Vec<Column>,
+    pub fk_cols: Vec<bool>,
+    pub enumerated_values: Vec<Vec<String>>,
+    pub rows: Vec<Vec<SqlValue>>,
+    pub width_sample_rows: Vec<Vec<SqlValue>>,
+    pub total_rows: i64,
+    pub area_width: u16,
+}
+
 #[allow(dead_code)]
 pub struct GridState {
     pub table_name: String,
     pub columns: Vec<Column>,
     pub window: virtual_scroll::VirtualWindow,
+    pub width_sample_rows: Vec<Vec<SqlValue>>,
     pub focused_row: usize,
     pub focused_col: usize,
     pub col_widths: Vec<u16>,
@@ -55,18 +67,18 @@ pub struct GridState {
 const HEADER_ROWS: u16 = 3;
 
 impl GridState {
-    pub fn new(
-        table_name: String,
-        columns: Vec<Column>,
-        fk_cols: Vec<bool>,
-        enumerated_values: Vec<Vec<String>>,
-        rows: Vec<Vec<SqlValue>>,
-        total_rows: i64,
-        area_width: u16,
-    ) -> Self {
+    pub fn new(init: GridInit) -> Self {
+        let GridInit {
+            table_name,
+            columns,
+            fk_cols,
+            enumerated_values,
+            rows,
+            width_sample_rows,
+            total_rows,
+            area_width,
+        } = init;
         let col_count = columns.len();
-        let col_widths =
-            layout::compute_col_widths(&columns, &rows, area_width, &HashMap::new(), &fk_cols);
         let fk_cols_safe = if fk_cols.len() == col_count {
             fk_cols
         } else {
@@ -77,23 +89,43 @@ impl GridState {
         } else {
             vec![Vec::new(); col_count]
         };
-        Self {
+        let mut state = Self {
             table_name,
             columns,
             window: virtual_scroll::VirtualWindow::new(0, rows, total_rows),
+            width_sample_rows,
             focused_row: 0,
             focused_col: 0,
-            col_widths,
+            col_widths: Vec::new(),
             h_scroll: 0,
             fk_cols: fk_cols_safe,
             enumerated_values: enumerated_values_safe,
             manual_widths: HashMap::new(),
             needs_fetch: false,
             viewport_start: 0,
-            avail_col_width: 80,
+            avail_col_width: area_width,
             sort: None,
             filter: crate::filter::FilterSet::default(),
-        }
+        };
+        state.recompute_col_widths(area_width);
+        state
+    }
+
+    pub fn recompute_col_widths(&mut self, avail_width: u16) {
+        let sizing_rows = if self.width_sample_rows.is_empty() {
+            &self.window.rows
+        } else {
+            &self.width_sample_rows
+        };
+        self.col_widths = layout::compute_col_widths(
+            &self.columns,
+            sizing_rows,
+            avail_width,
+            &self.manual_widths,
+            &self.fk_cols,
+        );
+        self.avail_col_width = avail_width;
+        self.adjust_h_scroll();
     }
 
     pub fn scroll_down(&mut self, n: usize) {
@@ -855,7 +887,9 @@ pub fn render_grid(
         .width
         .saturating_sub(gutter_width)
         .saturating_sub(1 + rail_width);
-    state.avail_col_width = data_width;
+    if state.avail_col_width != data_width {
+        state.recompute_col_widths(data_width);
+    }
 
     let mut visible_cols: Vec<usize> = Vec::new();
     let mut cumul = 0u16;
@@ -992,8 +1026,20 @@ fn hit_test_col(
 
 #[cfg(test)]
 mod tests {
-    use super::enum_value_color;
+    use super::{enum_value_color, GridInit, GridState};
+    use crate::db::{schema::Column, types::SqlValue};
     use crate::theme::Theme;
+
+    fn make_col(name: &str, col_type: &str, is_pk: bool) -> Column {
+        Column {
+            cid: 0,
+            name: name.to_string(),
+            col_type: col_type.to_string(),
+            not_null: false,
+            default_value: None,
+            is_pk,
+        }
+    }
 
     #[test]
     fn enum_values_in_same_column_get_distinct_colors() {
@@ -1004,5 +1050,28 @@ mod tests {
         let pending = enum_value_color("PENDING", &enum_values, &theme);
 
         assert_ne!(completed, pending);
+    }
+
+    #[test]
+    fn recompute_col_widths_uses_sample_rows_for_actual_view_width() {
+        let columns = vec![make_col("service", "TEXT", false)];
+        let mut grid = GridState::new(GridInit {
+            table_name: "payments".to_string(),
+            columns,
+            fk_cols: vec![false],
+            enumerated_values: vec![Vec::new()],
+            rows: vec![vec![SqlValue::Text("x".to_string())]],
+            width_sample_rows: vec![vec![SqlValue::Text(
+                "Microsoft Exchange Online".to_string(),
+            )]],
+            total_rows: 1,
+            area_width: 8,
+        });
+
+        let narrow = grid.col_widths[0];
+        grid.recompute_col_widths(40);
+
+        assert!(grid.col_widths[0] > narrow);
+        assert!(grid.col_widths[0] > 10);
     }
 }

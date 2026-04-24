@@ -249,6 +249,50 @@ pub fn fetch_rows(
     rows.collect::<Result<Vec<_>, _>>().context("fetching rows")
 }
 
+pub fn fetch_random_rows(
+    conn: &Connection,
+    table: &str,
+    columns: &[Column],
+    limit: usize,
+) -> anyhow::Result<Vec<Vec<types::SqlValue>>> {
+    use rusqlite::types::ValueRef;
+    use types::SqlValue;
+
+    if columns.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
+    let query = format!(
+        "SELECT {} FROM \"{}\" ORDER BY RANDOM() LIMIT {}",
+        col_names.join(", "),
+        table,
+        limit
+    );
+
+    let mut stmt = conn.prepare(&query)?;
+    let col_count = columns.len();
+    let rows = stmt.query_map([], |row| {
+        let mut values = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            let val = match row.get_ref(i)? {
+                ValueRef::Null => SqlValue::Null,
+                ValueRef::Integer(n) => SqlValue::Integer(n),
+                ValueRef::Real(f) => SqlValue::Real(f),
+                ValueRef::Text(bytes) => {
+                    SqlValue::Text(String::from_utf8_lossy(bytes).into_owned())
+                }
+                ValueRef::Blob(bytes) => SqlValue::Blob(bytes.to_vec()),
+            };
+            values.push(val);
+        }
+        Ok(values)
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("fetching random sample rows")
+}
+
 pub fn load_distinct_values(
     conn: &Connection,
     table: &str,

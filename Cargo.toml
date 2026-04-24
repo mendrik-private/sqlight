@@ -2,6 +2,23 @@
 name = "sqv"
 version = "0.1.0"
 edition = "2021"
+description = "Keyboard-first terminal SQLite viewer"
+readme = "README.md"
+repository = "https://github.com/mendrik-private/sqlight"
+homepage = "https://github.com/mendrik-private/sqlight"
+keywords = ["sqlite", "tui", "terminal", "database"]
+categories = ["command-line-utilities", "database"]
+
+[package.metadata.deb]
+name = "sqv"
+maintainer = "sqv project <noreply@github.com>"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+extended-description = """\
+A fast terminal UI for browsing and editing SQLite databases.
+Includes filtering, sorting, export, and popup editors for common cell types.
+"""
 
 [[bin]]
 name = "sqv"

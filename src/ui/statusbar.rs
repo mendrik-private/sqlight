@@ -5,7 +5,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::{app::App, db::types::SqlValue};
+use crate::{
+    app::{App, AppMode, FocusPane},
+    db::types::SqlValue,
+};
 
 fn fmt_number(n: i64) -> String {
     let s = n.abs().to_string();
@@ -155,6 +158,10 @@ pub fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    if let Some(hints) = action_hint_text(app) {
+        segments.push((hints, Style::default().fg(theme.accent).bg(theme.bg_soft)));
+    }
+
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::default().bg(theme.bg_soft));
 
@@ -206,6 +213,53 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
+}
+
+fn action_hint_text(app: &App) -> Option<String> {
+    if app.popup.is_some() || app.mode != AppMode::Browse {
+        return None;
+    }
+
+    let mut hints = Vec::new();
+
+    match app.focus {
+        FocusPane::Sidebar => {
+            hints.push("[enter] open".to_string());
+            if app.sidebar_visible {
+                hints.push("[tab] panel".to_string());
+            }
+        }
+        FocusPane::Grid => {
+            if app.grid.is_some() && !app.readonly {
+                hints.push("[enter] edit".to_string());
+            }
+            if app
+                .grid
+                .as_ref()
+                .and_then(|g| g.fk_cols.get(g.focused_col))
+                .copied()
+                .unwrap_or(false)
+            {
+                hints.push("[j] jump".to_string());
+            }
+            if !app.jump_stack.is_empty() {
+                hints.push("[backspace] back".to_string());
+            }
+            if app.sidebar_visible {
+                hints.push("[tab] panel".to_string());
+            }
+        }
+    }
+
+    if app.sidebar_visible {
+        hints.push("[ctrl-b] sidebar".to_string());
+    }
+
+    if hints.is_empty() {
+        None
+    } else {
+        Some(hints.join("  "))
+    }
 }
 
 fn put(buf: &mut Buffer, mut x: u16, y: u16, right: u16, text: &str, style: Style) -> u16 {

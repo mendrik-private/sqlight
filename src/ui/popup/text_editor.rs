@@ -319,6 +319,12 @@ pub fn render(
             Style::default().fg(theme.red),
         )));
     }
+    if status_lines.is_empty() {
+        status_lines.push(Line::from(Span::styled(
+            " editing value",
+            Style::default().fg(theme.fg_faint).bg(theme.bg_raised),
+        )));
+    }
     frame.render_widget(
         Paragraph::new(status_lines).style(Style::default().bg(theme.bg_raised)),
         sections[0],
@@ -364,9 +370,9 @@ pub fn render(
     frame.render_widget(
         Paragraph::new(vec![Line::from(Span::styled(
             if state.is_multiline {
-                " Enter newline · arrows move · PgUp/PgDn scroll · Esc cancel"
+                " Enter newline · Ctrl-Enter save · arrows move · PgUp/PgDn scroll · Esc cancel"
             } else {
-                " Enter commit · Esc cancel"
+                " Enter save · Ctrl-Enter save · Esc cancel"
             },
             hint_style,
         ))])

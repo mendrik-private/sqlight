@@ -77,7 +77,22 @@ pub struct PendingConfirm {
     pub timeout_secs: u64,
 }
 
-type GridFetchResult = (Vec<Vec<SqlValue>>, i64, Vec<Vec<String>>);
+type GridFetchResult = (
+    Vec<Vec<SqlValue>>,
+    i64,
+    Vec<Vec<String>>,
+    Vec<Vec<SqlValue>>,
+);
+
+struct GridDataReadyPayload {
+    table: String,
+    columns: Vec<Column>,
+    fk_cols: Vec<bool>,
+    enumerated_values: Vec<Vec<String>>,
+    width_sample_rows: Vec<Vec<SqlValue>>,
+    rows: Vec<Vec<SqlValue>>,
+    total_rows: i64,
+}
 
 pub struct App {
     pub schema: Schema,
@@ -129,6 +144,7 @@ pub enum Message {
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
         enumerated_values: Vec<Vec<String>>,
+        width_sample_rows: Vec<Vec<SqlValue>>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
     },
@@ -313,17 +329,19 @@ impl App {
                 columns,
                 fk_cols,
                 enumerated_values,
+                width_sample_rows,
                 rows,
                 total_rows,
             } => {
-                self.on_grid_data_ready(
-                    table.clone(),
+                self.on_grid_data_ready(GridDataReadyPayload {
                     columns,
                     fk_cols,
                     enumerated_values,
+                    width_sample_rows,
                     rows,
+                    table: table.clone(),
                     total_rows,
-                );
+                });
                 if let Some((pending_table, rowid)) = self.pending_jump_target.clone() {
                     if pending_table == table {
                         self.pending_jump_target = None;
@@ -845,21 +863,39 @@ impl App {
                     let tx = self.tx.clone();
                     let table_c = table.clone();
                     let col_c = col.clone();
-                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                        let conn = pool.get()?;
-                        crate::db::write::commit_cell_edit(&conn, &table_c, &col_c, rowid, &value)?;
-                        let _ = tx.send(Message::EditCommitted {
-                            rowid,
-                            table: table_c,
-                            col: col_c,
-                            original,
-                        });
-                        Ok(())
+                    tokio::task::spawn(async move {
+                        let tx_err = tx.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            let conn = pool.get()?;
+                            crate::db::write::commit_cell_edit(
+                                &conn, &table_c, &col_c, rowid, &value,
+                            )?;
+                            let _ = tx.send(Message::EditCommitted {
+                                rowid,
+                                table: table_c,
+                                col: col_c,
+                                original,
+                            });
+                            Ok(())
+                        })
+                        .await;
+
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                let _ = tx_err.send(Message::EditFailed(err.to_string()));
+                            }
+                            Err(err) => {
+                                let _ = tx_err.send(Message::EditFailed(err.to_string()));
+                            }
+                        }
                     });
+                    self.dirty = true;
+                } else {
+                    self.toast
+                        .push("No value selected to save", ToastKind::Error);
+                    self.dirty = true;
                 }
-                self.popup = None;
-                self.mode = AppMode::Browse;
-                self.dirty = true;
             }
             Message::EditCommitted {
                 rowid: _,
@@ -867,6 +903,8 @@ impl App {
                 col,
                 original,
             } => {
+                self.popup = None;
+                self.mode = AppMode::Browse;
                 self.undo_stack.push(UndoFrame {
                     op: UndoOp::Update,
                     table: self
@@ -1598,16 +1636,7 @@ impl App {
             PaletteCommand::ResetColumnWidths => {
                 if let Some(ref mut grid) = self.grid {
                     grid.manual_widths.clear();
-                    let avail = grid.avail_col_width;
-                    let sample_rows: Vec<Vec<SqlValue>> =
-                        grid.window.rows.iter().take(50).cloned().collect();
-                    grid.col_widths = crate::grid::layout::compute_col_widths(
-                        &grid.columns,
-                        &sample_rows,
-                        avail,
-                        &grid.manual_widths,
-                        &grid.fk_cols,
-                    );
+                    grid.recompute_col_widths(grid.avail_col_width);
                 }
                 self.toast.push("Column widths reset", ToastKind::Info);
             }
@@ -1930,6 +1959,19 @@ impl App {
 
     fn handle_edit_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            match self.popup {
+                Some(PopupKind::TextEditor(_))
+                | Some(PopupKind::ValuePicker(_))
+                | Some(PopupKind::DatePicker(_))
+                | Some(PopupKind::DatetimePicker(_))
+                | Some(PopupKind::FkPicker(_)) => {
+                    let _ = self.tx.send(Message::CommitEdit);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match &mut self.popup {
             None => {
                 self.mode = AppMode::Browse;
@@ -2496,15 +2538,18 @@ impl App {
                             .unwrap_or_default()
                     })
                     .collect();
-                Ok((rows, total, enumerated_values))
+                let width_sample_rows = db::fetch_random_rows(&conn, &table_c, &cols_c, 100)
+                    .unwrap_or_else(|_| rows.iter().take(100).cloned().collect());
+                Ok((rows, total, enumerated_values, width_sample_rows))
             })
             .await;
-            if let Ok(Ok((rows, total_rows, enumerated_values))) = result {
+            if let Ok(Ok((rows, total_rows, enumerated_values, width_sample_rows))) = result {
                 let _ = tx.send(Message::GridDataReady {
                     table,
                     columns,
                     fk_cols,
                     enumerated_values,
+                    width_sample_rows,
                     rows,
                     total_rows,
                 });
@@ -2574,30 +2619,35 @@ impl App {
         });
     }
 
-    fn on_grid_data_ready(
-        &mut self,
-        table: String,
-        columns: Vec<Column>,
-        fk_cols: Vec<bool>,
-        enumerated_values: Vec<Vec<String>>,
-        rows: Vec<Vec<SqlValue>>,
-        total_rows: i64,
-    ) {
+    fn on_grid_data_ready(&mut self, payload: GridDataReadyPayload) {
+        let GridDataReadyPayload {
+            table,
+            columns,
+            fk_cols,
+            enumerated_values,
+            width_sample_rows,
+            rows,
+            total_rows,
+        } = payload;
         let is_active = self
             .active_tab
             .and_then(|i| self.open_tabs.get(i))
             .is_some_and(|t| t.table_name == table);
         if is_active {
-            let grid_width = 180u16;
-            let mut grid = crate::grid::GridState::new(
-                table.clone(),
+            let grid_width = self
+                .grid_inner_area
+                .map(|area| area.width)
+                .unwrap_or_default();
+            let mut grid = crate::grid::GridState::new(crate::grid::GridInit {
+                table_name: table.clone(),
                 columns,
                 fk_cols,
                 enumerated_values,
                 rows,
+                width_sample_rows,
                 total_rows,
-                grid_width,
-            );
+                area_width: grid_width,
+            });
             if let Ok(saved_filter) = crate::filter::load_filter(&self.db_path, &table) {
                 if !saved_filter.is_empty() {
                     grid.filter = saved_filter.clone();

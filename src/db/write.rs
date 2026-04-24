@@ -20,9 +20,17 @@ pub fn commit_cell_edit(
         SqlValue::Blob(b) => tx.execute(&query, rusqlite::params![b, rowid]),
     };
     match result {
-        Ok(_) => {
+        Ok(1) => {
             tx.commit()?;
             Ok(())
+        }
+        Ok(0) => {
+            let _ = tx.rollback();
+            Err(anyhow::anyhow!("no row matched rowid {}", rowid))
+        }
+        Ok(n) => {
+            let _ = tx.rollback();
+            Err(anyhow::anyhow!("unexpected update count: {}", n))
         }
         Err(e) => {
             let _ = tx.rollback();
