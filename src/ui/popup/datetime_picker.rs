@@ -238,14 +238,6 @@ impl DatetimePickerState {
 fn parse_datetime_value(value: &SqlValue) -> Option<(NaiveDateTime, DatetimeTextFormat)> {
     match value {
         SqlValue::Text(text) => parse_datetime_text(text),
-        SqlValue::Integer(n) => {
-            let dt = if *n > 1_000_000_000_000 {
-                chrono::DateTime::from_timestamp_millis(*n).map(|dt| dt.naive_utc())
-            } else {
-                chrono::DateTime::from_timestamp(*n, 0).map(|dt| dt.naive_utc())
-            }?;
-            Some((dt, DatetimeTextFormat::SpaceSeparated))
-        }
         _ => None,
     }
 }
@@ -289,8 +281,8 @@ fn format_datetime_text(dt: NaiveDateTime, format: DatetimeTextFormat) -> String
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &DatetimePickerState, theme: &Theme) {
-    let popup_width = 36u16.min(area.width);
-    let popup_height = 18u16.min(area.height);
+    let popup_width = 42u16.min(area.width);
+    let popup_height = 19u16.min(area.height);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect {
@@ -313,21 +305,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatetimePickerState, theme:
     frame.render_widget(block, popup_area);
 
     let selected = state.selected_date();
+    let calendar_pad = " ".repeat(calendar_left_padding(inner.width));
     let mut lines = vec![
-        render_date_inputs(state, selected, theme),
+        Line::from(""),
+        render_date_inputs(state, selected, inner.width, theme),
         divider(inner.width, theme),
-        Line::from(Span::styled(
-            format!(" {:^30} ", state.view_month.format("%B %Y")),
-            Style::default().fg(theme.accent).bg(theme.bg_raised),
-        )),
-        Line::from(Span::styled(
-            " Mo Tue Wed Thu Fri Sat Sun",
-            Style::default().fg(theme.fg_dim).bg(theme.bg_raised),
-        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(calendar_pad.clone(), Style::default().bg(theme.bg_raised)),
+            Span::styled(
+                format!("{:^28}", state.view_month.format("%B %Y")),
+                Style::default().fg(theme.accent).bg(theme.bg_raised),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(calendar_pad, Style::default().bg(theme.bg_raised)),
+            Span::styled(
+                " Mo Tue Wed Thu Fri Sat Sun",
+                Style::default().fg(theme.fg_dim).bg(theme.bg_raised),
+            ),
+        ]),
     ];
-    lines.extend(render_calendar_lines(state, theme));
+    lines.extend(render_calendar_lines(state, theme, inner.width));
+    lines.push(Line::from(""));
     lines.push(divider(inner.width, theme));
-    lines.push(render_time_inputs(state, theme));
+    lines.push(render_time_inputs(state, inner.width, theme));
     lines.push(divider(inner.width, theme));
     lines.push(Line::from(Span::styled(
         " Tab next · Shift-Tab prev · PgUp/PgDn month · Enter ok",
@@ -343,55 +345,70 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatetimePickerState, theme:
 fn render_date_inputs(
     state: &DatetimePickerState,
     selected: NaiveDate,
+    area_width: u16,
     theme: &Theme,
 ) -> Line<'static> {
-    Line::from(vec![
-        field_span(
-            "D",
-            &format!("{:02}", selected.day()),
-            state.focus == DatetimeFocus::Day,
-            theme,
-        ),
-        Span::raw("  "),
-        field_span(
-            "M",
-            &format!("{:02}", selected.month()),
-            state.focus == DatetimeFocus::Month,
-            theme,
-        ),
-        Span::raw("  "),
-        field_span(
-            "Y",
-            &format!("{:04}", selected.year()),
-            state.focus == DatetimeFocus::Year,
-            theme,
-        ),
-    ])
+    centered_line(
+        Line::from(vec![
+            field_span(
+                "Day",
+                &format!("{:02}", selected.day()),
+                state.focus == DatetimeFocus::Day,
+                theme,
+            ),
+            Span::raw("  "),
+            field_span(
+                "Month",
+                &format!("{:02}", selected.month()),
+                state.focus == DatetimeFocus::Month,
+                theme,
+            ),
+            Span::raw("  "),
+            field_span(
+                "Year",
+                &format!("{:04}", selected.year()),
+                state.focus == DatetimeFocus::Year,
+                theme,
+            ),
+        ]),
+        area_width,
+        27,
+        theme,
+    )
 }
 
-fn render_time_inputs(state: &DatetimePickerState, theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        field_span(
-            "H",
-            &format!("{:02}", state.hour),
-            state.focus == DatetimeFocus::Hour,
-            theme,
-        ),
-        Span::raw("  "),
-        field_span(
-            "M",
-            &format!("{:02}", state.minute),
-            state.focus == DatetimeFocus::Minute,
-            theme,
-        ),
-        Span::raw("  "),
-        field_span(
-            "S",
-            &format!("{:02}", state.second),
-            state.focus == DatetimeFocus::Second,
-            theme,
-        ),
-    ])
+fn render_time_inputs(
+    state: &DatetimePickerState,
+    area_width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    centered_line(
+        Line::from(vec![
+            field_span(
+                "Hour",
+                &format!("{:02}", state.hour),
+                state.focus == DatetimeFocus::Hour,
+                theme,
+            ),
+            Span::raw("  "),
+            field_span(
+                "Minutes",
+                &format!("{:02}", state.minute),
+                state.focus == DatetimeFocus::Minute,
+                theme,
+            ),
+            Span::raw("  "),
+            field_span(
+                "Seconds",
+                &format!("{:02}", state.second),
+                state.focus == DatetimeFocus::Second,
+                theme,
+            ),
+        ]),
+        area_width,
+        31,
+        theme,
+    )
 }
 
 fn field_span(label: &str, value: &str, focused: bool, theme: &Theme) -> Span<'static> {
@@ -406,16 +423,24 @@ fn field_span(label: &str, value: &str, focused: bool, theme: &Theme) -> Span<'s
     Span::styled(format!("{label}:{value}"), style)
 }
 
-fn render_calendar_lines(state: &DatetimePickerState, theme: &Theme) -> Vec<Line<'static>> {
+fn render_calendar_lines(
+    state: &DatetimePickerState,
+    theme: &Theme,
+    area_width: u16,
+) -> Vec<Line<'static>> {
     let first_dow = state.view_month.weekday().num_days_from_monday();
     let days = days_in_month(state.view_month.year(), state.view_month.month());
     let today = chrono::Local::now().date_naive();
+    let left_padding = " ".repeat(calendar_left_padding(area_width));
 
     let mut day = 1u32;
     let mut col = first_dow;
     let mut out = Vec::new();
     while day <= days {
-        let mut spans = Vec::new();
+        let mut spans = vec![Span::styled(
+            left_padding.clone(),
+            Style::default().bg(theme.bg_raised),
+        )];
         for week_col in 0..7 {
             if (day == 1 && week_col < col) || day > days {
                 spans.push(Span::styled("    ", Style::default().bg(theme.bg_raised)));
@@ -442,6 +467,30 @@ fn render_calendar_lines(state: &DatetimePickerState, theme: &Theme) -> Vec<Line
         out.push(Line::from(spans));
     }
     out
+}
+
+fn calendar_left_padding(area_width: u16) -> usize {
+    area_width.saturating_sub(28) as usize / 2
+}
+
+fn centered_line(
+    content: Line<'static>,
+    area_width: u16,
+    content_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let pad = area_width.saturating_sub(content_width as u16) as usize / 2;
+    if pad == 0 {
+        return content;
+    }
+
+    let mut spans = Vec::with_capacity(content.spans.len() + 1);
+    spans.push(Span::styled(
+        " ".repeat(pad),
+        Style::default().bg(theme.bg_raised),
+    ));
+    spans.extend(content.spans);
+    Line::from(spans)
 }
 
 fn divider(width: u16, theme: &Theme) -> Line<'static> {
@@ -495,6 +544,7 @@ mod tests {
         assert!(!DatetimePickerState::supports_value(&SqlValue::Text(
             "2026-04-24".into()
         )));
+        assert!(!DatetimePickerState::supports_value(&SqlValue::Integer(42)));
     }
 
     #[test]

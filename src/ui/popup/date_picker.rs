@@ -171,7 +171,7 @@ fn parse_date_text(text: &str) -> Option<NaiveDate> {
 
 pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Theme) {
     let popup_width = 34u16.min(area.width);
-    let popup_height = 15u16.min(area.height);
+    let popup_height = 16u16.min(area.height);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect {
@@ -196,8 +196,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Th
     let selected = state.selected_date();
     let calendar_pad = " ".repeat(calendar_left_padding(inner.width));
     let mut lines = vec![
-        render_date_inputs(state, selected, theme),
+        Line::from(""),
+        render_date_inputs(state, selected, inner.width, theme),
         divider(inner.width, theme),
+        Line::from(""),
         Line::from(vec![
             Span::styled(calendar_pad.clone(), Style::default().bg(theme.bg_raised)),
             Span::styled(
@@ -214,6 +216,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Th
         ]),
     ];
     lines.extend(render_calendar_lines(state, theme, inner.width));
+    lines.push(Line::from(""));
     lines.push(divider(inner.width, theme));
     lines.push(Line::from(Span::styled(
         " Tab next · Shift-Tab prev · PgUp/PgDn month · Enter ok",
@@ -229,30 +232,36 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Th
 fn render_date_inputs(
     state: &DatePickerState,
     selected: NaiveDate,
+    area_width: u16,
     theme: &Theme,
 ) -> Line<'static> {
-    Line::from(vec![
-        field_span(
-            "Day",
-            &format!("{:02}", selected.day()),
-            state.focus == DateFocus::Day,
-            theme,
-        ),
-        Span::raw("  "),
-        field_span(
-            "Month",
-            &format!("{:02}", selected.month()),
-            state.focus == DateFocus::Month,
-            theme,
-        ),
-        Span::raw("  "),
-        field_span(
-            "Year",
-            &format!("{:04}", selected.year()),
-            state.focus == DateFocus::Year,
-            theme,
-        ),
-    ])
+    centered_line(
+        Line::from(vec![
+            field_span(
+                "Day",
+                &format!("{:02}", selected.day()),
+                state.focus == DateFocus::Day,
+                theme,
+            ),
+            Span::raw("  "),
+            field_span(
+                "Month",
+                &format!("{:02}", selected.month()),
+                state.focus == DateFocus::Month,
+                theme,
+            ),
+            Span::raw("  "),
+            field_span(
+                "Year",
+                &format!("{:04}", selected.year()),
+                state.focus == DateFocus::Year,
+                theme,
+            ),
+        ]),
+        area_width,
+        27,
+        theme,
+    )
 }
 
 fn field_span(label: &str, value: &str, focused: bool, theme: &Theme) -> Span<'static> {
@@ -315,6 +324,26 @@ fn render_calendar_lines(
 
 fn calendar_left_padding(area_width: u16) -> usize {
     area_width.saturating_sub(28) as usize / 2
+}
+
+fn centered_line(
+    content: Line<'static>,
+    area_width: u16,
+    content_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let pad = area_width.saturating_sub(content_width as u16) as usize / 2;
+    if pad == 0 {
+        return content;
+    }
+
+    let mut spans = Vec::with_capacity(content.spans.len() + 1);
+    spans.push(Span::styled(
+        " ".repeat(pad),
+        Style::default().bg(theme.bg_raised),
+    ));
+    spans.extend(content.spans);
+    Line::from(spans)
 }
 
 fn divider(width: u16, theme: &Theme) -> Line<'static> {

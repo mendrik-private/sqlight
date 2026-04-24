@@ -77,6 +77,8 @@ pub struct PendingConfirm {
     pub timeout_secs: u64,
 }
 
+type GridFetchResult = (Vec<Vec<SqlValue>>, i64, Vec<Vec<String>>);
+
 pub struct App {
     pub schema: Schema,
     pub sidebar: SidebarState,
@@ -126,7 +128,7 @@ pub enum Message {
         table: String,
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
-        enumerable_cols: Vec<bool>,
+        enumerated_values: Vec<Vec<String>>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
     },
@@ -310,7 +312,7 @@ impl App {
                 table,
                 columns,
                 fk_cols,
-                enumerable_cols,
+                enumerated_values,
                 rows,
                 total_rows,
             } => {
@@ -318,7 +320,7 @@ impl App {
                     table.clone(),
                     columns,
                     fk_cols,
-                    enumerable_cols,
+                    enumerated_values,
                     rows,
                     total_rows,
                 );
@@ -2473,29 +2475,36 @@ impl App {
         tokio::task::spawn(async move {
             let table_c = table.clone();
             let cols_c = columns.clone();
-            let result = tokio::task::spawn_blocking(
-                move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64, Vec<bool>)> {
-                    let conn = pool.get()?;
-                    let total = db::count_rows(&conn, &table_c, "", &[])?;
-                    let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None, "", &[])?;
-                    let enumerable_cols = cols_c
-                        .iter()
-                        .map(|col| {
-                            db::load_distinct_values(&conn, &table_c, &col.name, 16)
-                                .map(|values| !values.is_empty() && values.len() < 15)
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    Ok((rows, total, enumerable_cols))
-                },
-            )
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<GridFetchResult> {
+                let conn = pool.get()?;
+                let total = db::count_rows(&conn, &table_c, "", &[])?;
+                let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None, "", &[])?;
+                let enumerated_values = cols_c
+                    .iter()
+                    .map(|col| {
+                        db::load_distinct_values(&conn, &table_c, &col.name, 20)
+                            .map(|values| {
+                                if !values.is_empty()
+                                    && values.len() < 20
+                                    && values.iter().all(|value| value.chars().count() <= 20)
+                                {
+                                    values
+                                } else {
+                                    Vec::new()
+                                }
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                Ok((rows, total, enumerated_values))
+            })
             .await;
-            if let Ok(Ok((rows, total_rows, enumerable_cols))) = result {
+            if let Ok(Ok((rows, total_rows, enumerated_values))) = result {
                 let _ = tx.send(Message::GridDataReady {
                     table,
                     columns,
                     fk_cols,
-                    enumerable_cols,
+                    enumerated_values,
                     rows,
                     total_rows,
                 });
@@ -2570,7 +2579,7 @@ impl App {
         table: String,
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
-        enumerable_cols: Vec<bool>,
+        enumerated_values: Vec<Vec<String>>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
     ) {
@@ -2584,7 +2593,7 @@ impl App {
                 table.clone(),
                 columns,
                 fk_cols,
-                enumerable_cols,
+                enumerated_values,
                 rows,
                 total_rows,
                 grid_width,

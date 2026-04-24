@@ -43,7 +43,7 @@ pub struct GridState {
     pub col_widths: Vec<u16>,
     pub h_scroll: usize,
     pub fk_cols: Vec<bool>,
-    pub enumerable_cols: Vec<bool>,
+    pub enumerated_values: Vec<Vec<String>>,
     pub manual_widths: HashMap<usize, u16>,
     pub needs_fetch: bool,
     pub viewport_start: i64,
@@ -59,7 +59,7 @@ impl GridState {
         table_name: String,
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
-        enumerable_cols: Vec<bool>,
+        enumerated_values: Vec<Vec<String>>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
         area_width: u16,
@@ -72,10 +72,10 @@ impl GridState {
         } else {
             vec![false; col_count]
         };
-        let enumerable_cols_safe = if enumerable_cols.len() == col_count {
-            enumerable_cols
+        let enumerated_values_safe = if enumerated_values.len() == col_count {
+            enumerated_values
         } else {
-            vec![false; col_count]
+            vec![Vec::new(); col_count]
         };
         Self {
             table_name,
@@ -86,7 +86,7 @@ impl GridState {
             col_widths,
             h_scroll: 0,
             fk_cols: fk_cols_safe,
-            enumerable_cols: enumerable_cols_safe,
+            enumerated_values: enumerated_values_safe,
             manual_widths: HashMap::new(),
             needs_fetch: false,
             viewport_start: 0,
@@ -231,18 +231,7 @@ fn digits(n: i64) -> usize {
 }
 
 fn format_thousands(n: i64) -> String {
-    let abs_str = n.unsigned_abs().to_string();
-    let sign = if n < 0 { "-" } else { "" };
-    let chars: Vec<char> = abs_str.chars().collect();
-    let len = chars.len();
-    let mut result = String::with_capacity(len + len / 3 + 1);
-    for (i, &c) in chars.iter().enumerate() {
-        if i > 0 && (len - i).is_multiple_of(3) {
-            result.push('\u{202F}');
-        }
-        result.push(c);
-    }
-    format!("{}{}", sign, result)
+    n.to_string()
 }
 
 fn truncate_to_display_width(s: &str, max_w: usize) -> String {
@@ -293,19 +282,71 @@ fn badge_color(col: &Column, theme: &Theme) -> Color {
     }
 }
 
-fn enum_value_color(value: &str, theme: &Theme) -> Color {
-    let palette = [
+fn enum_value_color(value: &str, enum_values: &[String], theme: &Theme) -> Color {
+    if let Some(index) = enum_values.iter().position(|candidate| candidate == value) {
+        return indexed_enum_color(index, theme);
+    }
+
+    let hash = value.bytes().fold(0u64, |acc, byte| {
+        acc.wrapping_mul(131).wrapping_add(byte as u64)
+    });
+    indexed_enum_color(hash as usize, theme)
+}
+
+fn indexed_enum_color(index: usize, theme: &Theme) -> Color {
+    let base_palette = [
         theme.teal,
         theme.blue,
         theme.green,
         theme.yellow,
         theme.purple,
         theme.pink,
+        theme.accent,
+        theme.red,
     ];
-    let hash = value.bytes().fold(0u64, |acc, byte| {
-        acc.wrapping_mul(131).wrapping_add(byte as u64)
-    });
-    palette[(hash as usize) % palette.len()]
+    let base = base_palette[index % base_palette.len()];
+    let variant = index / base_palette.len();
+    match variant {
+        0 => base,
+        1 => mix_color(base, theme.fg, 0.24),
+        2 => mix_color(base, theme.fg_dim, 0.12),
+        _ => mix_color(base, theme.bg_raised, 0.08),
+    }
+}
+
+fn mix_color(base: Color, target: Color, ratio: f32) -> Color {
+    let (br, bg, bb) = color_rgb(base);
+    let (tr, tg, tb) = color_rgb(target);
+    let mix = |from: u8, to: u8| -> u8 {
+        let from = from as f32;
+        let to = to as f32;
+        ((from + (to - from) * ratio).round()).clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb))
+}
+
+fn color_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(v) => (v, v, v),
+        Color::Reset => (0, 0, 0),
+        Color::Black => (0, 0, 0),
+        Color::Red => (255, 0, 0),
+        Color::Green => (0, 255, 0),
+        Color::Yellow => (255, 255, 0),
+        Color::Blue => (0, 0, 255),
+        Color::Magenta => (255, 0, 255),
+        Color::Cyan => (0, 255, 255),
+        Color::Gray => (128, 128, 128),
+        Color::DarkGray => (64, 64, 64),
+        Color::LightRed => (255, 102, 102),
+        Color::LightGreen => (102, 255, 102),
+        Color::LightYellow => (255, 255, 153),
+        Color::LightBlue => (102, 178, 255),
+        Color::LightMagenta => (255, 102, 255),
+        Color::LightCyan => (102, 255, 255),
+        Color::White => (255, 255, 255),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -347,7 +388,7 @@ fn cell_val_style(
     col: &Column,
     theme: &Theme,
     is_focused: bool,
-    enumerable: bool,
+    enum_values: &[String],
 ) -> Style {
     if is_focused {
         return Style::default()
@@ -380,8 +421,8 @@ fn cell_val_style(
                 || col_upper.contains("DATE")
             {
                 Style::default().fg(theme.pink).add_modifier(Modifier::DIM)
-            } else if enumerable {
-                Style::default().fg(enum_value_color(text, theme))
+            } else if !enum_values.is_empty() {
+                Style::default().fg(enum_value_color(text, enum_values, theme))
             } else {
                 Style::default()
                     .fg(theme.fg_dim)
@@ -627,9 +668,13 @@ fn render_data_rows(
 
                 if let Some(val) = row_data.get(col_idx) {
                     let (content, align) = format_cell_content(val, col, inner_w);
-                    let enumerable = state.enumerable_cols.get(col_idx).copied().unwrap_or(false);
+                    let enum_values = state
+                        .enumerated_values
+                        .get(col_idx)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
                     let style =
-                        cell_val_style(val, col, theme, is_focused_cell, enumerable).bg(row_bg);
+                        cell_val_style(val, col, theme, is_focused_cell, enum_values).bg(row_bg);
                     let display_w = UnicodeWidthStr::width(content.as_str());
                     let content_x = match align {
                         CellAlign::Left => col_x + 1,
@@ -943,4 +988,21 @@ fn hit_test_col(
         col_x = col_end;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enum_value_color;
+    use crate::theme::Theme;
+
+    #[test]
+    fn enum_values_in_same_column_get_distinct_colors() {
+        let theme = Theme::default();
+        let enum_values = vec!["COMPLETED".to_string(), "PENDING".to_string()];
+
+        let completed = enum_value_color("COMPLETED", &enum_values, &theme);
+        let pending = enum_value_color("PENDING", &enum_values, &theme);
+
+        assert_ne!(completed, pending);
+    }
 }
