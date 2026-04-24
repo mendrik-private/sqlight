@@ -65,6 +65,7 @@ pub struct GridState {
 }
 
 const HEADER_ROWS: u16 = 3;
+const VIEWPORT_SCROLL_MARGIN_ROWS: usize = 5;
 
 impl GridState {
     pub fn new(init: GridInit) -> Self {
@@ -160,11 +161,12 @@ impl GridState {
         let vp = self.window.viewport_rows.max(1);
         let fr = self.focused_row as i64;
         let total = self.window.total_rows;
+        let margin = VIEWPORT_SCROLL_MARGIN_ROWS.min(vp.saturating_sub(1)) as i64;
 
-        if fr < self.viewport_start {
-            self.viewport_start = fr;
-        } else if fr >= self.viewport_start + vp as i64 {
-            self.viewport_start = fr - vp as i64 + 1;
+        if fr < self.viewport_start + margin {
+            self.viewport_start = fr - margin;
+        } else if fr >= self.viewport_start + vp as i64 - margin {
+            self.viewport_start = fr - vp as i64 + margin + 1;
         }
 
         self.viewport_start = self.viewport_start.max(0);
@@ -977,6 +979,10 @@ pub fn hit_test(area: Rect, state: &GridState, x: u16, y: u16) -> Option<GridHit
         return Some(GridHit::Scrollbar);
     }
 
+    if let Some(letter) = alphabet_rail::hit_test(area, state, x, y) {
+        return Some(GridHit::AlphabetRail(letter));
+    }
+
     if y < area.y + HEADER_ROWS {
         let col = hit_test_col(area, state, x, gutter_width, data_width)?;
         return Some(GridHit::Header(col));
@@ -996,6 +1002,7 @@ pub enum GridHit {
     Header(usize),
     RowGutter(usize),
     Cell { row: usize, col: usize },
+    AlphabetRail(char),
     Scrollbar,
 }
 
@@ -1108,5 +1115,26 @@ mod tests {
         let visible = compute_visible_cols(&grid, 20);
 
         assert_eq!(visible, vec![(0, 6), (1, 14)]);
+    }
+
+    #[test]
+    fn scroll_down_starts_moving_viewport_before_bottom_edge() {
+        let columns = vec![make_col("name", "TEXT", false)];
+        let mut grid = GridState::new(GridInit {
+            table_name: "customers".to_string(),
+            columns,
+            fk_cols: vec![false],
+            enumerated_values: vec![Vec::new()],
+            rows: vec![vec![SqlValue::Text("Alice".to_string())]; 20],
+            width_sample_rows: vec![],
+            total_rows: 100,
+            area_width: 40,
+        });
+        grid.window.viewport_rows = 10;
+
+        grid.scroll_down(5);
+
+        assert_eq!(grid.focused_row, 5);
+        assert_eq!(grid.viewport_start, 1);
     }
 }

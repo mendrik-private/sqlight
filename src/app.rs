@@ -1853,6 +1853,9 @@ impl App {
                             crate::grid::GridHit::Cell { row, col } => {
                                 grid.focus_cell(row, col);
                             }
+                            crate::grid::GridHit::AlphabetRail(letter) => {
+                                let _ = self.tx.send(Message::JumpToLetter(letter));
+                            }
                             crate::grid::GridHit::Scrollbar => {}
                         }
                     }
