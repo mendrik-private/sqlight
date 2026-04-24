@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -102,7 +104,7 @@ impl CommandPaletteState {
                     .map(|(score, indices)| (i, c, score, indices))
             })
             .collect();
-        results.sort_by(|a, b| b.2.cmp(&a.2));
+        results.sort_by_key(|result| Reverse(result.2));
         results
             .into_iter()
             .map(|(i, c, _, idx)| (i, c, idx))
@@ -207,8 +209,7 @@ pub fn render(
         let line_chars: Vec<char> = line.chars().collect();
         let label_start = 2usize;
 
-        let mut x = list_area.x;
-        for (i, &ch) in line_chars.iter().enumerate() {
+        for (x, (i, &ch)) in (list_area.x..).zip(line_chars.iter().enumerate()) {
             if x >= list_area.x + list_area.width {
                 break;
             }
@@ -226,7 +227,6 @@ pub fn render(
                     .bg(bg)
             };
             buf.set_string(x, row_y, ch.to_string(), style);
-            x += 1;
         }
     }
 }

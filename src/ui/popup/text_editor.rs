@@ -410,7 +410,11 @@ fn render_scrollbar(
     let thumb_top = if max_offset == 0 {
         0
     } else {
-        ((offset.min(max_offset) * (track_height.saturating_sub(thumb_height))) / max_offset)
+        offset
+            .min(max_offset)
+            .checked_mul(track_height.saturating_sub(thumb_height))
+            .and_then(|n| n.checked_div(max_offset))
+            .unwrap_or(0)
             .min(track_height.saturating_sub(thumb_height))
     };
     for row in thumb_top..thumb_top + thumb_height {

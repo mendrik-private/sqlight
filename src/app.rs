@@ -2433,10 +2433,8 @@ impl App {
                 self.focus = FocusPane::Sidebar;
                 self.dirty = true;
             }
-            (KeyCode::Backspace, _) => {
-                if !self.jump_stack.is_empty() {
-                    let _ = self.tx.send(Message::JumpBack);
-                }
+            (KeyCode::Backspace, _) if !self.jump_stack.is_empty() => {
+                let _ = self.tx.send(Message::JumpBack);
             }
             (KeyCode::Char('s'), KeyModifiers::NONE) => {
                 let _ = self.tx.send(Message::CycleSort);

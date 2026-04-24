@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use ratatui::{
     layout::Rect,
@@ -76,7 +78,7 @@ impl ValuePickerState {
                     .map(|(score, indices)| (i, v.as_str(), score, indices))
             })
             .collect();
-        results.sort_by(|a, b| b.2.cmp(&a.2));
+        results.sort_by_key(|result| Reverse(result.2));
         results
             .into_iter()
             .map(|(i, v, _, idx)| (i, v, idx))
