@@ -608,7 +608,7 @@ impl App {
                     let col_idx = grid.focused_col;
                     let col = grid.columns.get(col_idx).cloned();
                     let table_name = grid.table_name.clone();
-                    let abs_row = grid.viewport_start + grid.focused_row as i64;
+                    let abs_row = grid.focused_row as i64;
                     let cell_value = grid
                         .window
                         .get_row(abs_row)
@@ -997,7 +997,7 @@ impl App {
                         .foreign_keys
                         .iter()
                         .find(|fk| fk.from_col == col.name)?;
-                    let abs_row = g.viewport_start + g.focused_row as i64;
+                    let abs_row = g.focused_row as i64;
                     let cell_val = g.window.get_row(abs_row)?.get(col_idx)?.clone();
                     let sort = g.sort.as_ref().and_then(|s| {
                         g.columns
@@ -1377,17 +1377,27 @@ impl App {
                     self.toast.push("Read-only database", ToastKind::Error);
                     return;
                 }
-                if let Some(ref grid) = self.grid {
+                let delete_context = self.grid.as_ref().map(|grid| {
                     let row_num = grid.focused_row + 1;
                     let table = grid.table_name.clone();
-                    let approx_rowid = grid.viewport_start + grid.focused_row as i64 + 1;
+                    let abs_row = grid.focused_row as i64;
+                    let sort = grid.sort.as_ref().and_then(|s| {
+                        grid.columns
+                            .get(s.col_idx)
+                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                    });
+                    (row_num, table, abs_row, sort, grid.filter.clone())
+                });
+                if let Some((row_num, table, abs_row, sort, filter)) = delete_context {
+                    let Some(rowid) = self.resolve_rowid_at_offset(&table, abs_row, sort, filter)
+                    else {
+                        self.dirty = true;
+                        return;
+                    };
                     let msg = format!("Delete row #{}? [y/n]", row_num);
                     self.pending_confirm = Some(PendingConfirm {
                         message: msg,
-                        kind: ConfirmKind::DeleteRow {
-                            table,
-                            rowid: approx_rowid,
-                        },
+                        kind: ConfirmKind::DeleteRow { table, rowid },
                         created: std::time::Instant::now(),
                         timeout_secs: 5,
                     });

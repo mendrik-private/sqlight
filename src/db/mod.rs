@@ -136,11 +136,33 @@ fn load_foreign_keys(conn: &Connection, table: &str) -> anyhow::Result<Vec<Forei
         Ok(ForeignKey {
             to_table: row.get::<_, String>(2)?,
             from_col: row.get::<_, String>(3)?,
-            to_col: row.get::<_, String>(4)?,
+            // SQLite returns empty string when the FK references the parent PK implicitly.
+            to_col: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .context("loading foreign keys")
+    let mut fks: Vec<ForeignKey> = rows
+        .collect::<Result<Vec<_>, _>>()
+        .context("loading foreign keys")?;
+
+    for fk in &mut fks {
+        if fk.to_col.is_empty() {
+            fk.to_col = resolve_table_pk_col(conn, &fk.to_table).unwrap_or_default();
+        }
+    }
+
+    Ok(fks)
+}
+
+fn resolve_table_pk_col(conn: &Connection, table: &str) -> anyhow::Result<String> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{}\")", table))?;
+    let pk_col = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?
+        .filter_map(|r| r.ok())
+        .find(|(_, is_pk)| *is_pk != 0)
+        .map(|(name, _)| name);
+    pk_col.ok_or_else(|| anyhow::anyhow!("no primary key found for table \"{}\"", table))
 }
 
 fn load_index_names_for_table(conn: &Connection, table: &str) -> anyhow::Result<Vec<String>> {
