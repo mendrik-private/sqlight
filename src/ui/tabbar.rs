@@ -5,7 +5,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use crate::app::{App, FocusPane};
 
 pub enum TabMouseAction {
     Activate(usize),
@@ -49,8 +49,13 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         }
 
         let is_active = app.active_tab == Some(idx);
+        let is_focused_active = is_active && matches!(app.focus, FocusPane::Grid);
         let border_style = Style::default()
-            .fg(if is_active { theme.accent } else { theme.line })
+            .fg(if is_focused_active {
+                theme.accent
+            } else {
+                theme.line
+            })
             .bg(theme.bg);
         let base = if is_active {
             Style::default()
@@ -60,30 +65,12 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(theme.fg_dim).bg(theme.bg_soft)
         };
-        let badge_style = if is_active {
-            Style::default()
-                .fg(theme.bg)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.fg_dim).bg(theme.line_soft)
-        };
-        let close_style = if is_active {
+        let close_style = if is_focused_active {
             base.fg(theme.accent)
         } else {
             base.fg(theme.fg_mute)
         };
-        let badge = match tab.row_count {
-            Some(count) => format!(" {} ", count),
-            None => " … ".to_string(),
-        };
-        let content_width = 1
-            + tab.table_name.chars().count() as u16
-            + 1
-            + badge.chars().count() as u16
-            + 1
-            + 1
-            + 1;
+        let content_width = 1 + tab.table_name.chars().count() as u16 + 1 + 1 + 1;
         let tab_width = content_width + 2;
         let tab_x = x;
 
@@ -107,8 +94,6 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         label_x = put(buf, label_x, label_y, right, "│", border_style);
         label_x = put(buf, label_x, label_y, right, " ", base);
         label_x = put(buf, label_x, label_y, right, &tab.table_name, base);
-        label_x = put(buf, label_x, label_y, right, " ", base);
-        label_x = put(buf, label_x, label_y, right, &badge, badge_style);
         label_x = put(buf, label_x, label_y, right, " ", base);
         label_x = put(buf, label_x, label_y, right, "×", close_style);
         label_x = put(buf, label_x, label_y, right, " ", base);
@@ -164,14 +149,10 @@ pub fn hit_test(
             break;
         }
         let name_w = tab.table_name.chars().count() as u16;
-        let badge_w = match tab.row_count {
-            Some(count) => format!(" {} ", count).chars().count() as u16,
-            None => 3,
-        };
-        let tab_width = name_w + badge_w + 7;
+        let tab_width = name_w + 6;
         let tab_end = cursor.saturating_add(tab_width).min(right);
         if x >= cursor && x < tab_end {
-            let close_x = cursor + 1 + 1 + name_w + 1 + badge_w + 1;
+            let close_x = cursor + 1 + 1 + name_w + 1;
             if middle_click || x == close_x {
                 return Some(TabMouseAction::Close(idx));
             }

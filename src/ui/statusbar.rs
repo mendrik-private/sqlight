@@ -233,6 +233,10 @@ fn action_hint_text(app: &App) -> Option<String> {
             if app.grid.is_some() && !app.readonly {
                 hints.push("[enter] edit".to_string());
             }
+            if app.grid.is_some() {
+                hints.push("[s] sort".to_string());
+                hints.push("[f] filter".to_string());
+            }
             if app
                 .grid
                 .as_ref()

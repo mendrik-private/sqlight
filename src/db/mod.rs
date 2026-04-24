@@ -6,7 +6,7 @@ pub mod write;
 use anyhow::Context;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::functions::FunctionFlags;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use schema::{Column, ForeignKey, IndexMeta, Schema, TableMeta, ViewMeta};
 
@@ -293,6 +293,36 @@ pub fn fetch_random_rows(
         .context("fetching random sample rows")
 }
 
+pub fn fetch_rowid_at_offset(
+    conn: &Connection,
+    table: &str,
+    offset: i64,
+    order_by: Option<(&str, bool)>,
+    where_clause: &str,
+    where_params: &[rusqlite::types::Value],
+) -> anyhow::Result<Option<i64>> {
+    let order_clause = match order_by {
+        Some((col, asc)) => format!(" ORDER BY \"{}\" {}", col, if asc { "ASC" } else { "DESC" }),
+        None => String::new(),
+    };
+    let where_part = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clause)
+    };
+    let query = format!(
+        "SELECT rowid FROM \"{}\"{}{} LIMIT 1 OFFSET {}",
+        table, where_part, order_clause, offset
+    );
+    conn.query_row(
+        &query,
+        rusqlite::params_from_iter(where_params.iter()),
+        |row| row.get(0),
+    )
+    .optional()
+    .context("fetching rowid at offset")
+}
+
 pub fn load_distinct_values(
     conn: &Connection,
     table: &str,
@@ -318,4 +348,36 @@ pub fn load_distinct_values(
 
     rows.collect::<Result<Vec<_>, _>>()
         .context("loading distinct values")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_rowid_at_offset_respects_sort_and_filter() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE items (name TEXT, created_at TEXT);
+            INSERT INTO items (rowid, name, created_at) VALUES
+              (11, 'a', '2024-01-01'),
+              (22, 'b', '2024-01-02'),
+              (33, 'c', '2024-01-03');
+            "#,
+        )
+        .expect("seed items");
+
+        let rowid = fetch_rowid_at_offset(
+            &conn,
+            "items",
+            0,
+            Some(("created_at", false)),
+            "\"name\" != ?1",
+            &[rusqlite::types::Value::Text("c".to_string())],
+        )
+        .expect("rowid lookup");
+
+        assert_eq!(rowid, Some(22));
+    }
 }

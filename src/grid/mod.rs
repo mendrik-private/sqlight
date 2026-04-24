@@ -466,11 +466,33 @@ fn cell_val_style(
 
 // ── sub-render functions ─────────────────────────────────────────────────────
 
+fn compute_visible_cols(state: &GridState, data_width: u16) -> Vec<(usize, u16)> {
+    let mut visible_cols = Vec::new();
+    let mut cumul = 0u16;
+    for col_idx in state.h_scroll..state.col_widths.len() {
+        let w = state.col_widths[col_idx];
+        if visible_cols.is_empty() || cumul + w <= data_width {
+            visible_cols.push((col_idx, w));
+            cumul += w;
+        } else {
+            break;
+        }
+    }
+
+    if let Some((_, last_w)) = visible_cols.last_mut() {
+        if cumul < data_width {
+            *last_w = last_w.saturating_add(data_width - cumul);
+        }
+    }
+
+    visible_cols
+}
+
 fn render_header(
     buf: &mut Buffer,
     area: Rect,
     gutter_width: u16,
-    visible_cols: &[usize],
+    visible_cols: &[(usize, u16)],
     state: &GridState,
     theme: &Theme,
 ) {
@@ -486,12 +508,11 @@ fn render_header(
     }
 
     let mut col_x = area.x + gutter_width;
-    for &col_idx in visible_cols {
+    for &(col_idx, cell_w) in visible_cols {
         if col_x >= area.x + area.width {
             break;
         }
         let col = &state.columns[col_idx];
-        let cell_w = state.col_widths[col_idx];
         let actual_w = cell_w.min(area.x + area.width - col_x);
 
         let badge = col_badge(col);
@@ -609,7 +630,10 @@ fn render_header(
         );
     }
 
-    if state.h_scroll + visible_cols.len() < state.col_widths.len() {
+    if visible_cols
+        .last()
+        .is_some_and(|(last_idx, _)| last_idx + 1 < state.col_widths.len())
+    {
         let chevron_reserve = if alphabet_rail::should_show_rail(state) {
             alphabet_rail::RAIL_WIDTH + 1
         } else {
@@ -632,7 +656,7 @@ fn render_data_rows(
     area: Rect,
     gutter_width: u16,
     gutter_digits: usize,
-    visible_cols: &[usize],
+    visible_cols: &[(usize, u16)],
     state: &GridState,
     theme: &Theme,
 ) {
@@ -679,12 +703,11 @@ fn render_data_rows(
         let mut col_x = area.x + gutter_width;
 
         if let Some(row_data) = state.window.get_row(abs_row) {
-            for &col_idx in visible_cols {
+            for &(col_idx, cell_w) in visible_cols {
                 if col_x >= area.x + area.width {
                     break;
                 }
                 let col = &state.columns[col_idx];
-                let cell_w = state.col_widths[col_idx];
                 let actual_w = cell_w.min(area.x + area.width - col_x);
                 let inner_w = (actual_w as usize).saturating_sub(2);
 
@@ -735,7 +758,7 @@ fn render_focused_border(
     buf: &mut Buffer,
     area: Rect,
     gutter_width: u16,
-    visible_cols: &[usize],
+    visible_cols: &[(usize, u16)],
     state: &GridState,
     theme: &Theme,
 ) {
@@ -746,7 +769,7 @@ fn render_focused_border(
     let focused_row_in_view = focused_row_in_view as usize;
     let focused_col = state.focused_col;
 
-    let vis_pos = match visible_cols.iter().position(|&c| c == focused_col) {
+    let vis_pos = match visible_cols.iter().position(|&(c, _)| c == focused_col) {
         Some(p) => p,
         None => return,
     };
@@ -757,14 +780,10 @@ fn render_focused_border(
     }
 
     let mut cell_x = area.x + gutter_width;
-    for &col_idx in &visible_cols[..vis_pos] {
-        cell_x += state.col_widths[col_idx];
+    for &(_, cell_w) in &visible_cols[..vis_pos] {
+        cell_x += cell_w;
     }
-    let cell_w = if focused_col < state.col_widths.len() {
-        state.col_widths[focused_col]
-    } else {
-        return;
-    };
+    let cell_w = visible_cols[vis_pos].1;
 
     if cell_x >= area.x + area.width || cell_w < 2 {
         return;
@@ -891,17 +910,7 @@ pub fn render_grid(
         state.recompute_col_widths(data_width);
     }
 
-    let mut visible_cols: Vec<usize> = Vec::new();
-    let mut cumul = 0u16;
-    for col_idx in state.h_scroll..state.col_widths.len() {
-        let w = state.col_widths[col_idx];
-        if visible_cols.is_empty() || cumul + w <= data_width {
-            visible_cols.push(col_idx);
-            cumul += w;
-        } else {
-            break;
-        }
-    }
+    let visible_cols = compute_visible_cols(state, data_width);
 
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::default().bg(theme.bg));
@@ -1007,18 +1016,13 @@ fn hit_test_col(
     gutter_width: u16,
     data_width: u16,
 ) -> Option<usize> {
+    let visible_cols = compute_visible_cols(state, data_width);
     let mut col_x = area.x + gutter_width;
-    let mut cumul = 0u16;
-    for col_idx in state.h_scroll..state.col_widths.len() {
-        let w = state.col_widths[col_idx];
-        if !(cumul == 0 || cumul + w <= data_width) {
-            break;
-        }
+    for (col_idx, w) in visible_cols {
         let col_end = col_x.saturating_add(w);
         if x >= col_x && x < col_end {
             return Some(col_idx);
         }
-        cumul += w;
         col_x = col_end;
     }
     None
@@ -1026,7 +1030,7 @@ fn hit_test_col(
 
 #[cfg(test)]
 mod tests {
-    use super::{enum_value_color, GridInit, GridState};
+    use super::{compute_visible_cols, enum_value_color, GridInit, GridState};
     use crate::db::{schema::Column, types::SqlValue};
     use crate::theme::Theme;
 
@@ -1053,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn recompute_col_widths_uses_sample_rows_for_actual_view_width() {
+    fn recompute_col_widths_preserves_sampled_widths_even_in_narrow_viewports() {
         let columns = vec![make_col("service", "TEXT", false)];
         let mut grid = GridState::new(GridInit {
             table_name: "payments".to_string(),
@@ -1071,7 +1075,35 @@ mod tests {
         let narrow = grid.col_widths[0];
         grid.recompute_col_widths(40);
 
-        assert!(grid.col_widths[0] > narrow);
-        assert!(grid.col_widths[0] > 10);
+        assert!(narrow > 10);
+        assert_eq!(grid.col_widths[0], narrow);
+    }
+
+    #[test]
+    fn last_visible_column_expands_to_fill_viewport() {
+        let columns = vec![
+            make_col("id", "INTEGER", false),
+            make_col("name", "TEXT", false),
+            make_col("city", "TEXT", false),
+        ];
+        let mut grid = GridState::new(GridInit {
+            table_name: "customers".to_string(),
+            columns,
+            fk_cols: vec![false, false, false],
+            enumerated_values: vec![Vec::new(), Vec::new(), Vec::new()],
+            rows: vec![vec![
+                SqlValue::Integer(1),
+                SqlValue::Text("Alice".to_string()),
+                SqlValue::Text("Brussels".to_string()),
+            ]],
+            width_sample_rows: vec![],
+            total_rows: 1,
+            area_width: 80,
+        });
+        grid.col_widths = vec![6, 8, 8];
+
+        let visible = compute_visible_cols(&grid, 20);
+
+        assert_eq!(visible, vec![(0, 6), (1, 14)]);
     }
 }

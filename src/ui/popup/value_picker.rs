@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{block::BorderType, Block, Borders, Paragraph},
     Frame,
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{config::Config, db::types::SqlValue, theme::Theme};
 
@@ -228,19 +229,21 @@ pub fn render(
                 "Use new value: ",
                 Style::default().fg(theme.fg_dim).bg(bg),
             ));
-            spans.push(Span::styled(
-                val.clone(),
+            spans.extend(truncated_spans(
+                val,
+                &[],
+                inner.width.saturating_sub(17) as usize,
+                Style::default().fg(theme.green).bg(bg),
                 Style::default().fg(theme.green).bg(bg),
             ));
         } else {
-            for (ci, ch) in val.chars().enumerate() {
-                let style = if matched.contains(&ci) {
-                    Style::default().fg(theme.accent).bg(bg)
-                } else {
-                    Style::default().fg(theme.fg).bg(bg)
-                };
-                spans.push(Span::styled(ch.to_string(), style));
-            }
+            spans.extend(truncated_spans(
+                val,
+                matched,
+                inner.width.saturating_sub(4) as usize,
+                Style::default().fg(theme.fg).bg(bg),
+                Style::default().fg(theme.accent).bg(bg),
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -254,4 +257,84 @@ pub fn render(
         Paragraph::new(lines).style(Style::default().bg(theme.bg_raised)),
         inner,
     );
+}
+
+fn truncated_spans<'a>(
+    value: &'a str,
+    matched: &[usize],
+    max_width: usize,
+    base_style: Style,
+    matched_style: Style,
+) -> Vec<Span<'a>> {
+    if max_width == 0 {
+        return Vec::new();
+    }
+
+    let chars: Vec<(usize, char)> = value.chars().enumerate().collect();
+    let total_width: usize = chars
+        .iter()
+        .map(|(_, ch)| UnicodeWidthChar::width(*ch).unwrap_or(1))
+        .sum();
+    let needs_ellipsis = total_width > max_width;
+    let content_limit = if needs_ellipsis && max_width > 3 {
+        max_width - 3
+    } else {
+        max_width
+    };
+
+    let mut spans = Vec::new();
+    let mut used_width = 0usize;
+    for (idx, ch) in chars {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if used_width + ch_width > content_limit {
+            break;
+        }
+        let style = if matched.contains(&idx) {
+            matched_style
+        } else {
+            base_style
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+        used_width += ch_width;
+    }
+
+    if needs_ellipsis {
+        spans.push(Span::styled("...".to_string(), base_style));
+    }
+
+    spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncated_spans;
+    use ratatui::style::Style;
+
+    #[test]
+    fn truncates_long_values_with_ellipsis() {
+        let spans = truncated_spans(
+            "Embraer - Empresa Brasileira de Aeronáutica S.A.",
+            &[],
+            12,
+            Style::default(),
+            Style::default(),
+        );
+        let rendered = spans
+            .into_iter()
+            .map(|span| span.content)
+            .collect::<String>();
+
+        assert_eq!(rendered, "Embraer -...");
+    }
+
+    #[test]
+    fn leaves_short_values_untouched() {
+        let spans = truncated_spans("Apple Inc.", &[0], 20, Style::default(), Style::default());
+        let rendered = spans
+            .into_iter()
+            .map(|span| span.content)
+            .collect::<String>();
+
+        assert_eq!(rendered, "Apple Inc.");
+    }
 }

@@ -7,26 +7,9 @@ use crate::db::{
     types::{affinity, ColAffinity, SqlValue},
 };
 
-const TEXT_COMFORT_CHARS: u16 = 25;
 const CELL_SIDE_PADDING: u16 = 2;
-
-fn type_cap(col: &Column) -> u16 {
-    let upper = col.col_type.to_uppercase();
-    if upper.contains("DATETIME") || upper.contains("TIMESTAMP") {
-        return 19;
-    }
-    if upper.contains("DATE") {
-        return 10;
-    }
-    if upper.contains("BOOL") {
-        return 1;
-    }
-    match affinity(&col.col_type) {
-        ColAffinity::Text => 80,
-        ColAffinity::Integer | ColAffinity::Real | ColAffinity::Numeric => 20,
-        ColAffinity::Blob => 18,
-    }
-}
+const WIDTH_SAMPLE_TRIM: usize = 3;
+const MAX_HEURISTIC_COL_WIDTH: u16 = 40;
 
 fn cell_width(val: &SqlValue) -> u16 {
     match val {
@@ -38,30 +21,20 @@ fn cell_width(val: &SqlValue) -> u16 {
     }
 }
 
-fn percentile_width(mut widths: Vec<u16>, numerator: usize, denominator: usize) -> u16 {
+fn heuristic_width(mut widths: Vec<u16>) -> u16 {
     if widths.is_empty() {
         return 0;
     }
     widths.sort_unstable();
-    let idx = ((widths.len() - 1) * numerator) / denominator.max(1);
-    widths[idx]
-}
-
-fn trimmed_mean_width(mut widths: Vec<u16>) -> u16 {
-    if widths.is_empty() {
-        return 0;
-    }
-    widths.sort_unstable();
-    let len = widths.len();
-    let trim_each = match len {
-        0..=4 => 0,
-        5..=9 => 1,
-        _ => (len / 8).max(1),
+    let kept = if widths.len() > WIDTH_SAMPLE_TRIM * 2 {
+        &widths[WIDTH_SAMPLE_TRIM..widths.len() - WIDTH_SAMPLE_TRIM]
+    } else {
+        &widths[..]
     };
-    let trim_each = if trim_each * 2 >= len { 0 } else { trim_each };
-    let kept = &widths[trim_each..len - trim_each];
     let sum: u32 = kept.iter().map(|&w| w as u32).sum();
-    ((sum + (kept.len() as u32 / 2)) / kept.len() as u32) as u16
+    let avg = ((sum + (kept.len() as u32 / 2)) / kept.len() as u32) as u16;
+    avg.saturating_add(CELL_SIDE_PADDING)
+        .min(MAX_HEURISTIC_COL_WIDTH)
 }
 
 pub fn compute_col_widths(
@@ -80,44 +53,25 @@ pub fn compute_col_widths(
     }
 
     let mut preferred = vec![0u16; n];
-    let mut comfort = vec![0u16; n];
-    let mut min_w = vec![0u16; n];
-    let mut is_text_col = vec![false; n];
-    let mut cap_w = vec![0u16; n];
-    let mut stretch_target = vec![0u16; n];
 
     for (i, col) in columns.iter().enumerate() {
         if manual_widths.contains_key(&i) {
             let w = manual_widths[&i];
             preferred[i] = w;
-            min_w[i] = w;
             continue;
         }
-
-        let tc = type_cap(col);
-        cap_w[i] = tc;
 
         let sample_widths: Vec<u16> = rows
             .iter()
             .filter_map(|r| r.get(i))
             .map(cell_width)
             .collect();
-        let content_upper = percentile_width(sample_widths.clone(), 9, 10).min(tc);
-        let content_median = percentile_width(sample_widths.clone(), 1, 2).min(tc);
-        let content_trimmed_mean = trimmed_mean_width(sample_widths).min(tc);
-        let preferred_content_w = content_trimmed_mean.max(content_median) + CELL_SIDE_PADDING;
-        let stretch_content_w =
-            content_upper.max(content_trimmed_mean).max(content_median) + CELL_SIDE_PADDING;
+        let estimated_w = heuristic_width(sample_widths);
 
         let col_affinity = affinity(&col.col_type);
         let is_pk = col.is_pk;
         let is_fk = fk_cols.get(i).copied().unwrap_or(false);
         let name_width = UnicodeWidthStr::width(col.name.as_str()) as u16;
-        let numeric_or_fk = is_fk
-            || matches!(
-                col_affinity,
-                ColAffinity::Integer | ColAffinity::Real | ColAffinity::Numeric
-            );
         let meta_label = if is_pk {
             "INT key"
         } else if is_fk {
@@ -133,36 +87,11 @@ pub fn compute_col_widths(
         };
         let meta_width = UnicodeWidthStr::width(meta_label) as u16 + 2;
         let header_name_w = name_width + 2;
-        let min_width_i = if numeric_or_fk {
-            meta_width.max(6)
-        } else {
-            header_name_w.max(meta_width).max(6)
-        };
-        let preferred_i = preferred_content_w.max(min_width_i);
-        let comfort_i = if matches!(col_affinity, ColAffinity::Text) {
-            preferred_i.min(min_width_i.max(TEXT_COMFORT_CHARS + CELL_SIDE_PADDING))
-        } else {
-            preferred_i
-        };
-        let stretch_i = stretch_content_w.max(preferred_i);
+        let min_width_i = header_name_w.max(meta_width).max(6);
+        let preferred_i = estimated_w.max(min_width_i);
 
         preferred[i] = preferred_i;
-        comfort[i] = comfort_i;
-        min_w[i] = min_width_i;
-        stretch_target[i] = stretch_i;
-
-        is_text_col[i] = matches!(col_affinity, ColAffinity::Text);
     }
-
-    // Compute manual total and auto_avail
-    let manual_total: u16 = (0..n)
-        .filter(|i| manual_widths.contains_key(i))
-        .map(|i| manual_widths[&i])
-        .fold(0u16, |acc, w| acc.saturating_add(w));
-    let auto_avail = avail_width.saturating_sub(manual_total);
-    let auto_avail32 = auto_avail as u32;
-
-    let auto_indices: Vec<usize> = (0..n).filter(|i| !manual_widths.contains_key(i)).collect();
 
     let mut result = vec![0u16; n];
     for (&i, &w) in manual_widths {
@@ -171,65 +100,9 @@ pub fn compute_col_widths(
         }
     }
 
-    if auto_indices.is_empty() {
-        return result;
-    }
-
-    let total_preferred: u32 = auto_indices.iter().map(|&i| preferred[i] as u32).sum();
-    let total_comfort: u32 = auto_indices.iter().map(|&i| comfort[i] as u32).sum();
-    let total_min: u32 = auto_indices.iter().map(|&i| min_w[i] as u32).sum();
-    let total_weight: u32 = auto_indices
-        .iter()
-        .map(|&i| if is_text_col[i] { 2u32 } else { 1u32 })
-        .sum();
-
-    if total_preferred <= auto_avail32 {
-        // Case 1: all preferred widths fit; distribute slack
-        let slack = auto_avail32 - total_preferred;
-        for &i in &auto_indices {
-            let weight = if is_text_col[i] { 2u32 } else { 1u32 };
-            let extra = if total_weight > 0 {
-                slack * weight / total_weight
-            } else {
-                0
-            };
-            let w = preferred[i] as u32 + extra;
-            let cap = (stretch_target[i] as u32).max(preferred[i] as u32);
-            result[i] = w.min(cap).min(u16::MAX as u32) as u16;
-        }
-    } else if total_comfort <= auto_avail32 {
-        // Case 2: preferred doesn't fit, but a content-preserving baseline does.
-        let remainder = auto_avail32 - total_comfort;
-        let total_extra_weight: u32 = auto_indices
-            .iter()
-            .map(|&i| {
-                let desired = preferred[i].saturating_sub(comfort[i]) as u32;
-                desired.max(if is_text_col[i] { 2 } else { 1 })
-            })
-            .sum();
-        for &i in &auto_indices {
-            let desired = preferred[i].saturating_sub(comfort[i]) as u32;
-            let weight = desired.max(if is_text_col[i] { 2 } else { 1 });
-            let extra = if total_extra_weight > 0 {
-                remainder * weight / total_extra_weight
-            } else {
-                0
-            };
-            let w = comfort[i] as u32 + extra;
-            let cap = preferred[i] as u32;
-            result[i] = w.min(cap).min(u16::MAX as u32) as u16;
-        }
-    } else if total_min <= auto_avail32 {
-        // Case 3: even the content baseline would be squeezed too hard. Keep the
-        // baseline widths and rely on horizontal scrolling instead of collapsing
-        // columns back toward header-sized widths.
-        for &i in &auto_indices {
-            result[i] = comfort[i];
-        }
-    } else {
-        // Case 4: even min doesn't fit; use min widths
-        for &i in &auto_indices {
-            result[i] = min_w[i];
+    for (i, width) in preferred.into_iter().enumerate() {
+        if !manual_widths.contains_key(&i) {
+            result[i] = width;
         }
     }
 
@@ -349,8 +222,7 @@ mod tests {
         let rows = vec![vec![SqlValue::Text(long_text)]];
         let result = compute_col_widths(&cols, &rows, 200, &HashMap::new(), &[]);
         assert_eq!(result.len(), 1);
-        // Content capped at type_cap(80) + 2 = 82
-        assert!(result[0] <= 82, "width {} > 82", result[0]);
+        assert!(result[0] <= 40, "width {} > 40", result[0]);
         assert!(result[0] >= 6);
     }
 
@@ -364,18 +236,51 @@ mod tests {
     }
 
     #[test]
-    fn test_trimmed_mean_ignores_single_outlier() {
+    fn test_trimmed_average_ignores_three_high_and_low_outliers() {
         let cols = vec![make_col("status", "TEXT", false)];
         let rows = vec![
-            vec![SqlValue::Text("short".to_string())],
-            vec![SqlValue::Text("small".to_string())],
-            vec![SqlValue::Text("tiny".to_string())],
-            vec![SqlValue::Text("brief".to_string())],
+            vec![SqlValue::Text("a".to_string())],
+            vec![SqlValue::Text("bb".to_string())],
+            vec![SqlValue::Text("ccc".to_string())],
+            vec![SqlValue::Text("medium_len".to_string())],
+            vec![SqlValue::Text("medium_len".to_string())],
+            vec![SqlValue::Text("medium_len".to_string())],
+            vec![SqlValue::Text("medium_len".to_string())],
+            vec![SqlValue::Text("x".repeat(100))],
             vec![SqlValue::Text("x".repeat(200))],
+            vec![SqlValue::Text("x".repeat(300))],
         ];
         let result = compute_col_widths(&cols, &rows, 200, &HashMap::new(), &[]);
         assert_eq!(result.len(), 1);
-        assert!(result[0] < 20, "width {} should ignore outlier", result[0]);
+        assert_eq!(
+            result[0], 12,
+            "width {} should use the trimmed average",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_heuristic_width_caps_at_40_chars() {
+        let cols = vec![make_col("notes", "TEXT", false)];
+        let rows = (0..10)
+            .map(|_| vec![SqlValue::Text("x".repeat(120))])
+            .collect::<Vec<_>>();
+        let result = compute_col_widths(&cols, &rows, 200, &HashMap::new(), &[]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], 40);
+    }
+
+    #[test]
+    fn test_numeric_column_header_still_fits() {
+        let cols = vec![make_col("very_long_integer_id", "INTEGER", false)];
+        let rows = vec![vec![SqlValue::Integer(7)]];
+        let result = compute_col_widths(&cols, &rows, 200, &HashMap::new(), &[]);
+        assert_eq!(result.len(), 1);
+        assert!(
+            result[0] >= 22,
+            "width {} should fit the column header",
+            result[0]
+        );
     }
 
     #[test]

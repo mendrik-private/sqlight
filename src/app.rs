@@ -47,7 +47,6 @@ pub struct JumpFrame {
 
 pub struct TableTab {
     pub table_name: String,
-    pub row_count: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +82,8 @@ type GridFetchResult = (
     Vec<Vec<String>>,
     Vec<Vec<SqlValue>>,
 );
+
+const VALUE_PICKER_DISTINCT_LIMIT: usize = 100;
 
 struct GridDataReadyPayload {
     table: String,
@@ -131,10 +132,6 @@ pub enum Message {
     Resize(u16, u16),
     Tick,
     OpenTable(String),
-    RowCountReady {
-        table: String,
-        count: i64,
-    },
     CloseTab(usize),
     ActivateTab(usize),
     NextTab,
@@ -319,7 +316,6 @@ impl App {
                 }
             }
             Message::OpenTable(name) => self.open_table(name),
-            Message::RowCountReady { table, count } => self.update_row_count(table, count),
             Message::CloseTab(idx) => self.close_tab(idx),
             Message::ActivateTab(idx) => self.activate_tab(idx),
             Message::NextTab => self.next_tab(),
@@ -599,7 +595,7 @@ impl App {
                     self.toast.push("Read-only database", ToastKind::Error);
                     return;
                 }
-                if let Some(ref grid) = self.grid {
+                let popup_context = self.grid.as_ref().map(|grid| {
                     let col_idx = grid.focused_col;
                     let col = grid.columns.get(col_idx).cloned();
                     let table_name = grid.table_name.clone();
@@ -610,8 +606,55 @@ impl App {
                         .and_then(|r| r.get(col_idx))
                         .cloned()
                         .unwrap_or(SqlValue::Null);
-                    let actual_rowid = abs_row + 1;
                     let is_fk = grid.fk_cols.get(col_idx).copied().unwrap_or(false);
+                    let sort = grid.sort.as_ref().and_then(|s| {
+                        grid.columns
+                            .get(s.col_idx)
+                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                    });
+                    (
+                        col,
+                        table_name,
+                        abs_row,
+                        cell_value,
+                        is_fk,
+                        sort,
+                        grid.filter.clone(),
+                    )
+                });
+                if let Some((col, table_name, abs_row, cell_value, is_fk, sort, filter)) =
+                    popup_context
+                {
+                    let (where_clause, where_params) = filter_to_sql(&filter);
+                    let actual_rowid = match self.pool.get() {
+                        Ok(conn) => match db::fetch_rowid_at_offset(
+                            &conn,
+                            &table_name,
+                            abs_row,
+                            sort.as_ref().map(|(col, asc)| (col.as_str(), *asc)),
+                            &where_clause,
+                            &where_params,
+                        ) {
+                            Ok(Some(rowid)) => rowid,
+                            Ok(None) => {
+                                self.toast.push("Could not resolve rowid", ToastKind::Error);
+                                self.dirty = true;
+                                return;
+                            }
+                            Err(err) => {
+                                self.toast
+                                    .push(format!("Row lookup failed: {}", err), ToastKind::Error);
+                                self.dirty = true;
+                                return;
+                            }
+                        },
+                        Err(err) => {
+                            self.toast
+                                .push(format!("DB connection failed: {}", err), ToastKind::Error);
+                            self.dirty = true;
+                            return;
+                        }
+                    };
 
                     if let Some(col) = col {
                         if is_fk {
@@ -752,7 +795,7 @@ impl App {
                                     &conn,
                                     &table_name,
                                     &col.name,
-                                    21,
+                                    VALUE_PICKER_DISTINCT_LIMIT + 1,
                                 ) {
                                     Ok(values) => Some(values),
                                     Err(err) => {
@@ -772,10 +815,9 @@ impl App {
                                 }
                             };
 
-                            if let Some(values) = distinct_values.filter(|values| {
-                                (2..=20).contains(&values.len())
-                                    && values.iter().all(|v| v.chars().count() <= 40)
-                            }) {
+                            if let Some(values) =
+                                distinct_values.filter(|values| should_use_value_picker(values))
+                            {
                                 self.popup = Some(PopupKind::ValuePicker(
                                     crate::ui::popup::ValuePickerState::new(
                                         table_name,
@@ -898,33 +940,48 @@ impl App {
                 }
             }
             Message::EditCommitted {
-                rowid: _,
-                table: _,
+                rowid,
+                table,
                 col,
                 original,
             } => {
+                let maybe_fetch = if let Some(ref mut grid) = self.grid {
+                    grid.window.rows.clear();
+                    if !grid.window.fetch_in_flight {
+                        grid.window.fetch_in_flight = true;
+                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                        let sort = grid.sort.as_ref().and_then(|s| {
+                            grid.columns
+                                .get(s.col_idx)
+                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                        });
+                        Some((
+                            grid.table_name.clone(),
+                            grid.columns.clone(),
+                            sort,
+                            off,
+                            lim,
+                        ))
+                    } else {
+                        grid.needs_fetch = true;
+                        None
+                    }
+                } else {
+                    None
+                };
                 self.popup = None;
                 self.mode = AppMode::Browse;
                 self.undo_stack.push(UndoFrame {
                     op: UndoOp::Update,
-                    table: self
-                        .grid
-                        .as_ref()
-                        .map(|g| g.table_name.clone())
-                        .unwrap_or_default(),
-                    rowid: self
-                        .grid
-                        .as_ref()
-                        .map(|g| g.viewport_start + g.focused_row as i64 + 1)
-                        .unwrap_or(0),
+                    table,
+                    rowid,
                     cols: vec![(col, original)],
                 });
                 if self.undo_stack.len() > 100 {
                     self.undo_stack.remove(0);
                 }
-                if let Some(ref mut grid) = self.grid {
-                    grid.window.rows.clear();
-                    grid.needs_fetch = true;
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
                 self.toast.push("Cell updated", ToastKind::Success);
                 self.dirty = true;
@@ -1173,6 +1230,7 @@ impl App {
                     let col_idx = grid.focused_col;
                     if let Some(col) = grid.columns.get(col_idx) {
                         let col_name = col.name.clone();
+                        let col_type = col.col_type.clone();
                         let col_filter = grid
                             .filter
                             .columns
@@ -1180,7 +1238,7 @@ impl App {
                             .cloned()
                             .unwrap_or_default();
                         self.popup = Some(PopupKind::FilterPopup(FilterPopupState::new(
-                            col_name, col_filter,
+                            col_name, col_type, col_filter,
                         )));
                         self.mode = AppMode::Edit;
                     }
@@ -1292,11 +1350,6 @@ impl App {
                         grid.window.rows.clear();
                         grid.window.total_rows += 1;
                         grid.needs_fetch = true;
-                        if let Some(idx) = self.active_tab {
-                            if let Some(tab) = self.open_tabs.get_mut(idx) {
-                                tab.row_count = tab.row_count.map(|n| n + 1);
-                            }
-                        }
                     }
                 }
                 self.toast.push("Row inserted", ToastKind::Success);
@@ -1374,11 +1427,6 @@ impl App {
                         grid.window.rows.clear();
                         grid.window.total_rows = grid.window.total_rows.saturating_sub(1);
                         grid.needs_fetch = true;
-                        if let Some(idx) = self.active_tab {
-                            if let Some(tab) = self.open_tabs.get_mut(idx) {
-                                tab.row_count = tab.row_count.map(|n| n.saturating_sub(1));
-                            }
-                        }
                     }
                 }
                 self.toast.push("Row deleted", ToastKind::Success);
@@ -2215,65 +2263,82 @@ impl App {
                     self.dirty = true;
                 }
                 KeyCode::Enter => {
-                    let _ = self.tx.send(Message::ApplyFilter);
-                }
-                KeyCode::Char('n') if key.modifiers == KeyModifiers::NONE => {
-                    state.editing = true;
-                    state.edit_value.clear();
-                    self.dirty = true;
-                }
-                KeyCode::Delete => {
-                    if state.selected_rule < state.col_filter.rules.len() {
-                        state.col_filter.rules.remove(state.selected_rule);
-                        if state.selected_rule > 0
-                            && state.selected_rule >= state.col_filter.rules.len()
-                        {
-                            state.selected_rule -= 1;
+                    let mut toast = None;
+                    let mut apply = None;
+                    {
+                        if let Some(PopupKind::FilterPopup(state)) = self.popup.as_mut() {
+                            if state.focus == crate::ui::popup::filter::FilterPopupFocus::Delete {
+                                if state.delete_selected_rule() {
+                                    apply =
+                                        Some((state.col_name.clone(), state.col_filter.clone()));
+                                }
+                            } else {
+                                match state.add_rule() {
+                                    Ok(()) => {
+                                        apply = Some((
+                                            state.col_name.clone(),
+                                            state.col_filter.clone(),
+                                        ));
+                                    }
+                                    Err(message) => {
+                                        toast = Some(message);
+                                    }
+                                }
+                            }
+                            self.dirty = true;
                         }
                     }
-                    self.dirty = true;
+                    if let Some(message) = toast {
+                        self.toast.push(message, ToastKind::Error);
+                    }
+                    if let Some((col_name, col_filter)) = apply {
+                        self.apply_column_filter(col_name, col_filter);
+                    }
                 }
                 KeyCode::Up => {
-                    if state.editing {
-                        state.edit_op = state.edit_op.prev();
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Delete {
+                        state.select_prev_rule();
                     } else {
-                        state.selected_rule = state.selected_rule.saturating_sub(1);
+                        state.prev_op();
                     }
                     self.dirty = true;
                 }
                 KeyCode::Down => {
-                    if state.editing {
-                        state.edit_op = state.edit_op.next();
-                    } else if !state.col_filter.rules.is_empty() {
-                        state.selected_rule =
-                            (state.selected_rule + 1).min(state.col_filter.rules.len() - 1);
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Delete {
+                        state.select_next_rule();
+                    } else {
+                        state.next_op();
                     }
                     self.dirty = true;
                 }
-                KeyCode::Left if state.editing => {
-                    state.edit_op = state.edit_op.prev();
-                    self.dirty = true;
-                }
-                KeyCode::Right if state.editing => {
-                    state.edit_op = state.edit_op.next();
-                    self.dirty = true;
-                }
-                KeyCode::Char(' ') => {
-                    if let Some(rule) = state.col_filter.rules.get_mut(state.selected_rule) {
-                        rule.enabled = !rule.enabled;
+                KeyCode::Left => {
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle {
+                        state.move_cursor_left();
                     }
+                    self.dirty = true;
+                }
+                KeyCode::Right => {
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle {
+                        state.move_cursor_right();
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Tab => {
+                    state.toggle_focus();
                     self.dirty = true;
                 }
                 KeyCode::Char(c)
-                    if state.editing
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle
                         && (key.modifiers == KeyModifiers::NONE
                             || key.modifiers == KeyModifiers::SHIFT) =>
                 {
-                    state.edit_value.push(c);
+                    state.push_char(c);
                     self.dirty = true;
                 }
-                KeyCode::Backspace if state.editing => {
-                    state.edit_value.pop();
+                KeyCode::Backspace
+                    if state.focus == crate::ui::popup::filter::FilterPopupFocus::Needle =>
+                {
+                    state.pop_char();
                     self.dirty = true;
                 }
                 _ => {}
@@ -2450,16 +2515,13 @@ impl App {
             if new_tab || self.active_tab.is_none() {
                 self.open_tabs.push(TableTab {
                     table_name: name.clone(),
-                    row_count: None,
                 });
                 self.active_tab = Some(self.open_tabs.len() - 1);
             } else if let Some(idx) = self.active_tab {
                 if let Some(tab) = self.open_tabs.get_mut(idx) {
                     tab.table_name = name.clone();
-                    tab.row_count = None;
                 }
             }
-            self.spawn_row_count(name.clone());
             self.request_table_view(&name);
         }
         self.dirty = true;
@@ -2489,28 +2551,6 @@ impl App {
         }
     }
 
-    fn spawn_row_count(&self, table: String) {
-        let tx = self.tx.clone();
-        let pool = Arc::clone(&self.pool);
-        tokio::task::spawn(async move {
-            let table_inner = table.clone();
-            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
-                let conn = pool.get()?;
-                let count: i64 = conn.query_row(
-                    &format!("SELECT COUNT(*) FROM \"{}\"", table_inner),
-                    [],
-                    |row| row.get(0),
-                )?;
-                Ok(count)
-            })
-            .await;
-
-            if let Ok(Ok(count)) = result {
-                let _ = tx.send(Message::RowCountReady { table, count });
-            }
-        });
-    }
-
     fn spawn_grid_fetch(&self, table: String, columns: Vec<Column>, fk_cols: Vec<bool>) {
         let tx = self.tx.clone();
         let pool = Arc::clone(&self.pool);
@@ -2538,8 +2578,8 @@ impl App {
                             .unwrap_or_default()
                     })
                     .collect();
-                let width_sample_rows = db::fetch_random_rows(&conn, &table_c, &cols_c, 100)
-                    .unwrap_or_else(|_| rows.iter().take(100).cloned().collect());
+                let width_sample_rows = db::fetch_random_rows(&conn, &table_c, &cols_c, 50)
+                    .unwrap_or_else(|_| rows.iter().take(50).cloned().collect());
                 Ok((rows, total, enumerated_values, width_sample_rows))
             })
             .await;
@@ -2707,11 +2747,30 @@ impl App {
         self.dirty = true;
     }
 
-    fn update_row_count(&mut self, table: String, count: i64) {
-        for tab in &mut self.open_tabs {
-            if tab.table_name == table {
-                tab.row_count = Some(count);
+    fn apply_column_filter(&mut self, col_name: String, col_filter: crate::filter::ColumnFilter) {
+        if let Some(ref mut grid) = self.grid {
+            if col_filter.rules.iter().any(|rule| rule.enabled) {
+                grid.filter.columns.insert(col_name, col_filter);
+            } else {
+                grid.filter.columns.remove(&col_name);
             }
+            grid.viewport_start = 0;
+            grid.focused_row = 0;
+            grid.window.rows.clear();
+            grid.window.offset = 0;
+            let table = grid.table_name.clone();
+            let cols = grid.columns.clone();
+            let sort = grid.sort.as_ref().and_then(|s| {
+                grid.columns
+                    .get(s.col_idx)
+                    .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+            });
+            let (off, lim) = grid.window.fetch_params(0);
+            grid.window.fetch_in_flight = true;
+            let filter = grid.filter.clone();
+            let db_path = self.db_path.clone();
+            let _ = crate::filter::save_filter(&filter, &db_path, &table);
+            self.spawn_window_fetch_with_filter(&table, &cols, sort, off, lim, filter);
         }
         self.dirty = true;
     }
@@ -2781,4 +2840,31 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     out
+}
+
+fn should_use_value_picker(values: &[String]) -> bool {
+    !values.is_empty() && values.len() <= VALUE_PICKER_DISTINCT_LIMIT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_value_picker;
+
+    #[test]
+    fn value_picker_allows_long_entries_when_distinct_set_is_small() {
+        let values = vec![
+            "Apple Inc.".to_string(),
+            "Embraer - Empresa Brasileira de Aeronáutica S.A.".to_string(),
+        ];
+
+        assert!(should_use_value_picker(&values));
+    }
+
+    #[test]
+    fn value_picker_rejects_empty_and_oversized_distinct_sets() {
+        assert!(!should_use_value_picker(&[]));
+
+        let values = (0..101).map(|i| format!("value-{i}")).collect::<Vec<_>>();
+        assert!(!should_use_value_picker(&values));
+    }
 }
