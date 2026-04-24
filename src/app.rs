@@ -126,6 +126,7 @@ pub enum Message {
         table: String,
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
+        enumerable_cols: Vec<bool>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
     },
@@ -309,10 +310,18 @@ impl App {
                 table,
                 columns,
                 fk_cols,
+                enumerable_cols,
                 rows,
                 total_rows,
             } => {
-                self.on_grid_data_ready(table.clone(), columns, fk_cols, rows, total_rows);
+                self.on_grid_data_ready(
+                    table.clone(),
+                    columns,
+                    fk_cols,
+                    enumerable_cols,
+                    rows,
+                    total_rows,
+                );
                 if let Some((pending_table, rowid)) = self.pending_jump_target.clone() {
                     if pending_table == table {
                         self.pending_jump_target = None;
@@ -700,6 +709,7 @@ impl App {
                             || upper.contains("DATETIME")
                             || (upper.contains("DATE") && upper.contains("TIME"))
                             || looks_like_epoch_datetime
+                            || DatetimePickerState::supports_value(&original)
                         {
                             self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
                                 table_name,
@@ -707,7 +717,9 @@ impl App {
                                 col.name,
                                 original,
                             )));
-                        } else if upper.contains("DATE") {
+                        } else if upper.contains("DATE")
+                            || DatePickerState::supports_value(&original)
+                        {
                             self.popup = Some(PopupKind::DatePicker(DatePickerState::new(
                                 table_name,
                                 actual_rowid,
@@ -1653,7 +1665,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use crossterm::event::{MouseButton, MouseEventKind};
 
         if self.popup.is_some() || matches!(self.mode, AppMode::Edit) {
             return;
@@ -1711,10 +1723,7 @@ impl App {
                 if left_click {
                     if let Some(action) = self.sidebar.click_at(area, &self.schema, x, y) {
                         match action {
-                            SidebarAction::OpenTable(name) => self.open_table_with_mode(
-                                name,
-                                mouse.modifiers.contains(KeyModifiers::SHIFT),
-                            ),
+                            SidebarAction::OpenTable(name) => self.open_table_with_mode(name, true),
                             SidebarAction::Toggle => {}
                         }
                     }
@@ -2260,6 +2269,12 @@ impl App {
         use crossterm::event::{KeyCode, KeyModifiers};
         let vp = self.grid.as_ref().map_or(20, |g| g.window.viewport_rows);
         match (key.code, key.modifiers) {
+            (KeyCode::Down, KeyModifiers::CONTROL) => {
+                let _ = self.tx.send(Message::ScrollDown(vp.saturating_sub(1)));
+            }
+            (KeyCode::Up, KeyModifiers::CONTROL) => {
+                let _ = self.tx.send(Message::ScrollUp(vp.saturating_sub(1)));
+            }
             (KeyCode::Down, _) => {
                 let _ = self.tx.send(Message::MoveDown);
             }
@@ -2459,19 +2474,28 @@ impl App {
             let table_c = table.clone();
             let cols_c = columns.clone();
             let result = tokio::task::spawn_blocking(
-                move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64)> {
+                move || -> anyhow::Result<(Vec<Vec<SqlValue>>, i64, Vec<bool>)> {
                     let conn = pool.get()?;
                     let total = db::count_rows(&conn, &table_c, "", &[])?;
                     let rows = db::fetch_rows(&conn, &table_c, &cols_c, 0, 50, None, "", &[])?;
-                    Ok((rows, total))
+                    let enumerable_cols = cols_c
+                        .iter()
+                        .map(|col| {
+                            db::load_distinct_values(&conn, &table_c, &col.name, 16)
+                                .map(|values| !values.is_empty() && values.len() < 15)
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    Ok((rows, total, enumerable_cols))
                 },
             )
             .await;
-            if let Ok(Ok((rows, total_rows))) = result {
+            if let Ok(Ok((rows, total_rows, enumerable_cols))) = result {
                 let _ = tx.send(Message::GridDataReady {
                     table,
                     columns,
                     fk_cols,
+                    enumerable_cols,
                     rows,
                     total_rows,
                 });
@@ -2546,6 +2570,7 @@ impl App {
         table: String,
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
+        enumerable_cols: Vec<bool>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
     ) {
@@ -2559,6 +2584,7 @@ impl App {
                 table.clone(),
                 columns,
                 fk_cols,
+                enumerable_cols,
                 rows,
                 total_rows,
                 grid_width,

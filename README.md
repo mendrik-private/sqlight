@@ -36,7 +36,7 @@ sqv check-terminal
 | `↑ ↓ ← →` / `h j k l` | Move focused cell |
 | `Home` / `End` | First / last column in row |
 | `Ctrl-Home` / `Ctrl-End` | First / last cell in table |
-| `PgUp` / `PgDn` | Scroll one viewport |
+| `PgUp` / `PgDn` / `Ctrl-↑` / `Ctrl-↓` | Scroll one viewport |
 | `Mouse wheel` | Scroll 3 rows |
 | `Shift-wheel` | Scroll 3 columns |
 | `Click cell` | Focus cell |

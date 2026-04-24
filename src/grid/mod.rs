@@ -43,6 +43,7 @@ pub struct GridState {
     pub col_widths: Vec<u16>,
     pub h_scroll: usize,
     pub fk_cols: Vec<bool>,
+    pub enumerable_cols: Vec<bool>,
     pub manual_widths: HashMap<usize, u16>,
     pub needs_fetch: bool,
     pub viewport_start: i64,
@@ -58,6 +59,7 @@ impl GridState {
         table_name: String,
         columns: Vec<Column>,
         fk_cols: Vec<bool>,
+        enumerable_cols: Vec<bool>,
         rows: Vec<Vec<SqlValue>>,
         total_rows: i64,
         area_width: u16,
@@ -70,6 +72,11 @@ impl GridState {
         } else {
             vec![false; col_count]
         };
+        let enumerable_cols_safe = if enumerable_cols.len() == col_count {
+            enumerable_cols
+        } else {
+            vec![false; col_count]
+        };
         Self {
             table_name,
             columns,
@@ -79,6 +86,7 @@ impl GridState {
             col_widths,
             h_scroll: 0,
             fk_cols: fk_cols_safe,
+            enumerable_cols: enumerable_cols_safe,
             manual_widths: HashMap::new(),
             needs_fetch: false,
             viewport_start: 0,
@@ -285,6 +293,21 @@ fn badge_color(col: &Column, theme: &Theme) -> Color {
     }
 }
 
+fn enum_value_color(value: &str, theme: &Theme) -> Color {
+    let palette = [
+        theme.teal,
+        theme.blue,
+        theme.green,
+        theme.yellow,
+        theme.purple,
+        theme.pink,
+    ];
+    let hash = value.bytes().fold(0u64, |acc, byte| {
+        acc.wrapping_mul(131).wrapping_add(byte as u64)
+    });
+    palette[(hash as usize) % palette.len()]
+}
+
 #[derive(Clone, Copy)]
 enum CellAlign {
     Left,
@@ -319,7 +342,13 @@ fn format_cell_content(val: &SqlValue, col: &Column, inner_w: usize) -> (String,
     }
 }
 
-fn cell_val_style(val: &SqlValue, col: &Column, theme: &Theme, is_focused: bool) -> Style {
+fn cell_val_style(
+    val: &SqlValue,
+    col: &Column,
+    theme: &Theme,
+    is_focused: bool,
+    enumerable: bool,
+) -> Style {
     if is_focused {
         return Style::default()
             .fg(theme.accent)
@@ -351,8 +380,8 @@ fn cell_val_style(val: &SqlValue, col: &Column, theme: &Theme, is_focused: bool)
                 || col_upper.contains("DATE")
             {
                 Style::default().fg(theme.pink).add_modifier(Modifier::DIM)
-            } else if looks_like_enum_value(text) {
-                Style::default().fg(theme.teal)
+            } else if enumerable {
+                Style::default().fg(enum_value_color(text, theme))
             } else {
                 Style::default()
                     .fg(theme.fg_dim)
@@ -360,16 +389,6 @@ fn cell_val_style(val: &SqlValue, col: &Column, theme: &Theme, is_focused: bool)
             }
         }
     }
-}
-
-fn looks_like_enum_value(text: &str) -> bool {
-    let trimmed = text.trim();
-    !trimmed.is_empty()
-        && trimmed.chars().count() <= 16
-        && !trimmed.chars().any(char::is_whitespace)
-        && trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
 }
 
 // ── sub-render functions ─────────────────────────────────────────────────────
@@ -406,12 +425,11 @@ fn render_header(
         let bcolor = badge_color(col, theme);
         let is_pk = col.is_pk;
         let is_fk = state.fk_cols.get(col_idx).copied().unwrap_or(false);
-        let pfx = if is_pk {
-            "key"
-        } else if is_fk {
-            "link"
-        } else {
-            ""
+        let pfx = match (is_pk, is_fk) {
+            (true, true) => " 🔑 🔗",
+            (true, false) => " 🔑",
+            (false, true) => " 🔗",
+            (false, false) => "",
         };
 
         for y in 0..HEADER_ROWS.min(area.height) {
@@ -469,9 +487,9 @@ fn render_header(
         }
 
         let meta_text = match (pfx.is_empty(), filter_active) {
-            (false, true) => format!("{badge} {pfx} ƒ"),
-            (false, false) => format!("{badge} {pfx}"),
-            (true, true) => format!("{badge} ƒ"),
+            (false, true) => format!("{}{} ƒ", badge.trim_end(), pfx),
+            (false, false) => format!("{}{}", badge.trim_end(), pfx),
+            (true, true) => format!("{} ƒ", badge.trim_end()),
             (true, false) => badge.trim_end().to_string(),
         };
         let meta_truncated =
@@ -609,7 +627,9 @@ fn render_data_rows(
 
                 if let Some(val) = row_data.get(col_idx) {
                     let (content, align) = format_cell_content(val, col, inner_w);
-                    let style = cell_val_style(val, col, theme, is_focused_cell).bg(row_bg);
+                    let enumerable = state.enumerable_cols.get(col_idx).copied().unwrap_or(false);
+                    let style =
+                        cell_val_style(val, col, theme, is_focused_cell, enumerable).bg(row_bg);
                     let display_w = UnicodeWidthStr::width(content.as_str());
                     let content_x = match align {
                         CellAlign::Left => col_x + 1,
@@ -676,7 +696,7 @@ fn render_focused_border(
     let border_style = Style::default().fg(theme.accent);
     let right_x = cell_x + cell_w - 1;
 
-    if cell_y > area.y + HEADER_ROWS {
+    if cell_y >= area.y + HEADER_ROWS {
         let ty = cell_y - 1;
         buf.set_string(cell_x, ty, "┌", border_style);
         if cell_w > 2 {

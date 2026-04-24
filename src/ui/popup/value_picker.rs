@@ -115,7 +115,7 @@ impl ValuePickerState {
     }
 
     fn custom_value_available(&self) -> bool {
-        !self.filter.trim().is_empty() && !self.values.iter().any(|value| value == &self.filter)
+        !self.filter.trim().is_empty() && self.is_textual()
     }
 
     fn selected_custom(&self) -> bool {
@@ -137,6 +137,14 @@ impl ValuePickerState {
                 .map(|(_, value, matched)| (value.to_string(), matched, false)),
         );
         entries
+    }
+
+    fn is_textual(&self) -> bool {
+        let upper = self.col_type.to_uppercase();
+        !(upper.contains("INT")
+            || upper.contains("REAL")
+            || upper.contains("FLOAT")
+            || upper.contains("DOUBLE"))
     }
 }
 

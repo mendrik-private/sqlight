@@ -1,4 +1,6 @@
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{
+    DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Timelike,
+};
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -33,21 +35,22 @@ pub struct DatetimePickerState {
     pub original: SqlValue,
     pub focus: DatetimeFocus,
     pub epoch_millis: bool,
+    text_format: DatetimeTextFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatetimeTextFormat {
+    SpaceSeparated,
+    IsoNaive,
+    IsoUtc,
+    IsoOffset(i32),
 }
 
 impl DatetimePickerState {
     pub fn new(table: String, rowid: i64, col_name: String, original: SqlValue) -> Self {
-        let dt = match &original {
-            SqlValue::Text(s) => NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok(),
-            SqlValue::Integer(n) => {
-                if *n > 1_000_000_000_000 {
-                    chrono::DateTime::from_timestamp_millis(*n).map(|dt| dt.naive_utc())
-                } else {
-                    chrono::DateTime::from_timestamp(*n, 0).map(|dt| dt.naive_utc())
-                }
-            }
-            _ => None,
-        };
+        let (dt, text_format) = parse_datetime_value(&original)
+            .map(|(dt, format)| (Some(dt), format))
+            .unwrap_or((None, DatetimeTextFormat::SpaceSeparated));
         let epoch_millis = matches!(&original, SqlValue::Integer(n) if *n > 1_000_000_000_000);
         let today = chrono::Local::now().naive_local();
         let (date, hour, minute, second) = if let Some(d) = dt {
@@ -74,7 +77,12 @@ impl DatetimePickerState {
             original,
             focus: DatetimeFocus::Day,
             epoch_millis,
+            text_format,
         }
+    }
+
+    pub fn supports_value(value: &SqlValue) -> bool {
+        parse_datetime_value(value).is_some()
     }
 
     pub fn prev_month(&mut self) {
@@ -166,7 +174,7 @@ impl DatetimePickerState {
                         SqlValue::Integer(epoch)
                     }
                 } else {
-                    SqlValue::Text(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    SqlValue::Text(format_datetime_text(dt, self.text_format))
                 }
             }
             None => SqlValue::Null,
@@ -224,6 +232,59 @@ impl DatetimePickerState {
         if let Some(date) = self.date {
             self.view_month = first_of_month(date).unwrap_or(self.view_month);
         }
+    }
+}
+
+fn parse_datetime_value(value: &SqlValue) -> Option<(NaiveDateTime, DatetimeTextFormat)> {
+    match value {
+        SqlValue::Text(text) => parse_datetime_text(text),
+        SqlValue::Integer(n) => {
+            let dt = if *n > 1_000_000_000_000 {
+                chrono::DateTime::from_timestamp_millis(*n).map(|dt| dt.naive_utc())
+            } else {
+                chrono::DateTime::from_timestamp(*n, 0).map(|dt| dt.naive_utc())
+            }?;
+            Some((dt, DatetimeTextFormat::SpaceSeparated))
+        }
+        _ => None,
+    }
+}
+
+fn parse_datetime_text(text: &str) -> Option<(NaiveDateTime, DatetimeTextFormat)> {
+    let trimmed = text.trim();
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        let format = if trimmed.ends_with('Z') {
+            DatetimeTextFormat::IsoUtc
+        } else {
+            DatetimeTextFormat::IsoOffset(dt.offset().local_minus_utc())
+        };
+        return Some((dt.naive_local(), format));
+    }
+
+    for (pattern, format) in [
+        ("%Y-%m-%dT%H:%M:%S%.f", DatetimeTextFormat::IsoNaive),
+        ("%Y-%m-%dT%H:%M:%S", DatetimeTextFormat::IsoNaive),
+        ("%Y-%m-%d %H:%M:%S%.f", DatetimeTextFormat::SpaceSeparated),
+        ("%Y-%m-%d %H:%M:%S", DatetimeTextFormat::SpaceSeparated),
+    ] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, pattern) {
+            return Some((dt, format));
+        }
+    }
+
+    None
+}
+
+fn format_datetime_text(dt: NaiveDateTime, format: DatetimeTextFormat) -> String {
+    match format {
+        DatetimeTextFormat::SpaceSeparated => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        DatetimeTextFormat::IsoNaive => dt.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        DatetimeTextFormat::IsoUtc => format!("{}Z", dt.format("%Y-%m-%dT%H:%M:%S")),
+        DatetimeTextFormat::IsoOffset(offset_seconds) => FixedOffset::east_opt(offset_seconds)
+            .and_then(|offset| offset.from_local_datetime(&dt).single())
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
     }
 }
 
@@ -413,4 +474,41 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     NaiveDate::from_ymd_opt(next_year, next_month, 1)
         .and_then(|d| d.pred_opt())
         .map_or(28, |d| d.day())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatetimePickerState;
+    use crate::db::types::SqlValue;
+
+    #[test]
+    fn detects_iso_datetime_text_values() {
+        assert!(DatetimePickerState::supports_value(&SqlValue::Text(
+            "2026-04-24T12:34:56Z".into()
+        )));
+        assert!(DatetimePickerState::supports_value(&SqlValue::Text(
+            "2026-04-24T12:34:56+02:30".into()
+        )));
+        assert!(DatetimePickerState::supports_value(&SqlValue::Text(
+            "2026-04-24 12:34:56".into()
+        )));
+        assert!(!DatetimePickerState::supports_value(&SqlValue::Text(
+            "2026-04-24".into()
+        )));
+    }
+
+    #[test]
+    fn preserves_iso_datetime_text_format_on_commit() {
+        let state = DatetimePickerState::new(
+            "events".into(),
+            1,
+            "starts_at".into(),
+            SqlValue::Text("2026-04-24T12:34:56Z".into()),
+        );
+
+        assert_eq!(
+            state.as_sql_value(),
+            SqlValue::Text("2026-04-24T12:34:56Z".into())
+        );
+    }
 }

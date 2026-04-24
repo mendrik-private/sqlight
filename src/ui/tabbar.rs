@@ -20,6 +20,12 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::default().bg(theme.bg));
+    buf.set_string(
+        area.x,
+        area.y,
+        "─".repeat(area.width as usize),
+        Style::default().fg(theme.line).bg(theme.bg),
+    );
 
     let mut x = area.x;
     let right = area.x + area.width;

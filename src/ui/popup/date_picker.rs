@@ -30,10 +30,7 @@ pub struct DatePickerState {
 
 impl DatePickerState {
     pub fn new(table: String, rowid: i64, col_name: String, original: SqlValue) -> Self {
-        let current = match &original {
-            SqlValue::Text(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d").ok(),
-            _ => None,
-        };
+        let current = parse_date_value(&original);
         let today = chrono::Local::now().date_naive();
         let base = current.unwrap_or(today);
         let view_month = first_of_month(base).unwrap_or(today);
@@ -46,6 +43,10 @@ impl DatePickerState {
             original,
             focus: DateFocus::Day,
         }
+    }
+
+    pub fn supports_value(value: &SqlValue) -> bool {
+        parse_date_value(value).is_some()
     }
 
     pub fn prev_month(&mut self) {
@@ -157,6 +158,17 @@ impl DatePickerState {
     }
 }
 
+fn parse_date_value(value: &SqlValue) -> Option<NaiveDate> {
+    match value {
+        SqlValue::Text(text) => parse_date_text(text),
+        _ => None,
+    }
+}
+
+fn parse_date_text(text: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()
+}
+
 pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Theme) {
     let popup_width = 34u16.min(area.width);
     let popup_height = 15u16.min(area.height);
@@ -182,19 +194,26 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatePickerState, theme: &Th
     frame.render_widget(block, popup_area);
 
     let selected = state.selected_date();
+    let calendar_pad = " ".repeat(calendar_left_padding(inner.width));
     let mut lines = vec![
         render_date_inputs(state, selected, theme),
         divider(inner.width, theme),
-        Line::from(Span::styled(
-            format!(" {:^28} ", state.view_month.format("%B %Y")),
-            Style::default().fg(theme.accent).bg(theme.bg_raised),
-        )),
-        Line::from(Span::styled(
-            " Mo Tue Wed Thu Fri Sat Sun",
-            Style::default().fg(theme.fg_dim).bg(theme.bg_raised),
-        )),
+        Line::from(vec![
+            Span::styled(calendar_pad.clone(), Style::default().bg(theme.bg_raised)),
+            Span::styled(
+                format!("{:^28}", state.view_month.format("%B %Y")),
+                Style::default().fg(theme.accent).bg(theme.bg_raised),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(calendar_pad, Style::default().bg(theme.bg_raised)),
+            Span::styled(
+                " Mo Tue Wed Thu Fri Sat Sun",
+                Style::default().fg(theme.fg_dim).bg(theme.bg_raised),
+            ),
+        ]),
     ];
-    lines.extend(render_calendar_lines(state, theme));
+    lines.extend(render_calendar_lines(state, theme, inner.width));
     lines.push(divider(inner.width, theme));
     lines.push(Line::from(Span::styled(
         " Tab next · Shift-Tab prev · PgUp/PgDn month · Enter ok",
@@ -214,21 +233,21 @@ fn render_date_inputs(
 ) -> Line<'static> {
     Line::from(vec![
         field_span(
-            "D",
+            "Day",
             &format!("{:02}", selected.day()),
             state.focus == DateFocus::Day,
             theme,
         ),
         Span::raw("  "),
         field_span(
-            "M",
+            "Month",
             &format!("{:02}", selected.month()),
             state.focus == DateFocus::Month,
             theme,
         ),
         Span::raw("  "),
         field_span(
-            "Y",
+            "Year",
             &format!("{:04}", selected.year()),
             state.focus == DateFocus::Year,
             theme,
@@ -248,16 +267,24 @@ fn field_span(label: &str, value: &str, focused: bool, theme: &Theme) -> Span<'s
     Span::styled(format!("{label}:{value}"), style)
 }
 
-fn render_calendar_lines(state: &DatePickerState, theme: &Theme) -> Vec<Line<'static>> {
+fn render_calendar_lines(
+    state: &DatePickerState,
+    theme: &Theme,
+    area_width: u16,
+) -> Vec<Line<'static>> {
     let first_dow = state.view_month.weekday().num_days_from_monday();
     let days = days_in_month(state.view_month.year(), state.view_month.month());
     let today = chrono::Local::now().date_naive();
+    let left_padding = " ".repeat(calendar_left_padding(area_width));
 
     let mut day = 1u32;
     let mut col = first_dow;
     let mut out = Vec::new();
     while day <= days {
-        let mut spans = Vec::new();
+        let mut spans = vec![Span::styled(
+            left_padding.clone(),
+            Style::default().bg(theme.bg_raised),
+        )];
         for week_col in 0..7 {
             if (day == 1 && week_col < col) || day > days {
                 spans.push(Span::styled("    ", Style::default().bg(theme.bg_raised)));
@@ -286,6 +313,10 @@ fn render_calendar_lines(state: &DatePickerState, theme: &Theme) -> Vec<Line<'st
     out
 }
 
+fn calendar_left_padding(area_width: u16) -> usize {
+    area_width.saturating_sub(28) as usize / 2
+}
+
 fn divider(width: u16, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width as usize),
@@ -312,4 +343,20 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     NaiveDate::from_ymd_opt(next_year, next_month, 1)
         .and_then(|d| d.pred_opt())
         .map_or(28, |d| d.day())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatePickerState;
+    use crate::db::types::SqlValue;
+
+    #[test]
+    fn detects_iso_date_text_values() {
+        assert!(DatePickerState::supports_value(&SqlValue::Text(
+            "2026-04-24".into()
+        )));
+        assert!(!DatePickerState::supports_value(&SqlValue::Text(
+            "2026-04-24T12:34:56Z".into()
+        )));
+    }
 }
