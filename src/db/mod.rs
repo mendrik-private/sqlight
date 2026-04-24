@@ -189,6 +189,17 @@ pub fn count_rows(
     Ok(count)
 }
 
+fn build_order_terms(order_by: Option<(&str, bool)>) -> String {
+    match order_by {
+        Some((col, asc)) => format!(
+            "\"{}\" {}, rowid ASC",
+            col,
+            if asc { "ASC" } else { "DESC" }
+        ),
+        None => "rowid ASC".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn fetch_rows(
     conn: &Connection,
@@ -208,10 +219,7 @@ pub fn fetch_rows(
     }
 
     let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
-    let order_clause = match order_by {
-        Some((col, asc)) => format!(" ORDER BY \"{}\" {}", col, if asc { "ASC" } else { "DESC" }),
-        None => String::new(),
-    };
+    let order_clause = format!(" ORDER BY {}", build_order_terms(order_by));
     let where_part = if where_clause.is_empty() {
         String::new()
     } else {
@@ -301,10 +309,7 @@ pub fn fetch_rowid_at_offset(
     where_clause: &str,
     where_params: &[rusqlite::types::Value],
 ) -> anyhow::Result<Option<i64>> {
-    let order_clause = match order_by {
-        Some((col, asc)) => format!(" ORDER BY \"{}\" {}", col, if asc { "ASC" } else { "DESC" }),
-        None => String::new(),
-    };
+    let order_clause = format!(" ORDER BY {}", build_order_terms(order_by));
     let where_part = if where_clause.is_empty() {
         String::new()
     } else {
@@ -321,6 +326,37 @@ pub fn fetch_rowid_at_offset(
     )
     .optional()
     .context("fetching rowid at offset")
+}
+
+pub fn fetch_offset_for_rowid(
+    conn: &Connection,
+    table: &str,
+    rowid: i64,
+    order_by: Option<(&str, bool)>,
+    where_clause: &str,
+    where_params: &[rusqlite::types::Value],
+) -> anyhow::Result<Option<i64>> {
+    let order_terms = build_order_terms(order_by);
+    let where_part = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clause)
+    };
+    let rowid_param = where_params.len() + 1;
+    let query = format!(
+        "SELECT visible_offset FROM (
+            SELECT rowid, ROW_NUMBER() OVER (ORDER BY {}) - 1 AS visible_offset
+            FROM \"{}\"{}
+        ) WHERE rowid = ?{} LIMIT 1",
+        order_terms, table, where_part, rowid_param
+    );
+    let mut params = where_params.to_vec();
+    params.push(rusqlite::types::Value::Integer(rowid));
+    conn.query_row(&query, rusqlite::params_from_iter(params.iter()), |row| {
+        row.get(0)
+    })
+    .optional()
+    .context("fetching offset for rowid")
 }
 
 pub fn load_distinct_values(
@@ -379,5 +415,56 @@ mod tests {
         .expect("rowid lookup");
 
         assert_eq!(rowid, Some(22));
+    }
+
+    #[test]
+    fn fetch_offset_for_rowid_respects_sort_and_filter() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE items (name TEXT, created_at TEXT);
+            INSERT INTO items (rowid, name, created_at) VALUES
+              (11, 'a', '2024-01-01'),
+              (22, 'b', '2024-01-02'),
+              (33, 'c', '2024-01-03');
+            "#,
+        )
+        .expect("seed items");
+
+        let offset = fetch_offset_for_rowid(
+            &conn,
+            "items",
+            22,
+            Some(("created_at", false)),
+            "\"name\" != ?1",
+            &[rusqlite::types::Value::Text("a".to_string())],
+        )
+        .expect("offset lookup");
+
+        assert_eq!(offset, Some(1));
+    }
+
+    #[test]
+    fn sorted_row_lookup_is_stable_for_duplicate_values() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE items (name TEXT);
+            INSERT INTO items (rowid, name) VALUES
+              (20, 'same'),
+              (10, 'same'),
+              (30, 'z');
+            "#,
+        )
+        .expect("seed items");
+
+        let first_rowid = fetch_rowid_at_offset(&conn, "items", 0, Some(("name", true)), "", &[])
+            .expect("rowid lookup");
+        let second_offset =
+            fetch_offset_for_rowid(&conn, "items", 20, Some(("name", true)), "", &[])
+                .expect("offset lookup");
+
+        assert_eq!(first_rowid, Some(10));
+        assert_eq!(second_offset, Some(1));
     }
 }

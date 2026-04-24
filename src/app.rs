@@ -40,9 +40,15 @@ pub enum FocusPane {
 
 pub struct JumpFrame {
     pub table: String,
-    pub row: i64,
-    #[allow(dead_code)]
+    pub rowid: i64,
     pub col: usize,
+}
+
+#[derive(Clone)]
+pub struct PendingJumpTarget {
+    pub table: String,
+    pub rowid: i64,
+    pub col: Option<usize>,
 }
 
 pub struct TableTab {
@@ -119,7 +125,7 @@ pub struct App {
     pub sidebar_area: Option<Rect>,
     pub grid_outer_area: Option<Rect>,
     pub grid_inner_area: Option<Rect>,
-    pub pending_jump_target: Option<(String, i64)>,
+    pub pending_jump_target: Option<PendingJumpTarget>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
@@ -187,6 +193,7 @@ pub enum Message {
     JumpToTargetRow {
         table: String,
         rowid: i64,
+        col: Option<usize>,
     },
     CycleSort,
     JumpToLetter(char),
@@ -338,10 +345,10 @@ impl App {
                     table: table.clone(),
                     total_rows,
                 });
-                if let Some((pending_table, rowid)) = self.pending_jump_target.clone() {
-                    if pending_table == table {
+                if let Some(pending_target) = self.pending_jump_target.clone() {
+                    if pending_target.table == table {
                         self.pending_jump_target = None;
-                        self.jump_to_rowid(table, rowid);
+                        self.jump_to_rowid(table, pending_target.rowid, pending_target.col);
                     }
                 }
             }
@@ -625,35 +632,11 @@ impl App {
                 if let Some((col, table_name, abs_row, cell_value, is_fk, sort, filter)) =
                     popup_context
                 {
-                    let (where_clause, where_params) = filter_to_sql(&filter);
-                    let actual_rowid = match self.pool.get() {
-                        Ok(conn) => match db::fetch_rowid_at_offset(
-                            &conn,
-                            &table_name,
-                            abs_row,
-                            sort.as_ref().map(|(col, asc)| (col.as_str(), *asc)),
-                            &where_clause,
-                            &where_params,
-                        ) {
-                            Ok(Some(rowid)) => rowid,
-                            Ok(None) => {
-                                self.toast.push("Could not resolve rowid", ToastKind::Error);
-                                self.dirty = true;
-                                return;
-                            }
-                            Err(err) => {
-                                self.toast
-                                    .push(format!("Row lookup failed: {}", err), ToastKind::Error);
-                                self.dirty = true;
-                                return;
-                            }
-                        },
-                        Err(err) => {
-                            self.toast
-                                .push(format!("DB connection failed: {}", err), ToastKind::Error);
-                            self.dirty = true;
-                            return;
-                        }
+                    let Some(actual_rowid) =
+                        self.resolve_rowid_at_offset(&table_name, abs_row, sort, filter)
+                    else {
+                        self.dirty = true;
+                        return;
                     };
 
                     if let Some(col) = col {
@@ -1014,15 +997,45 @@ impl App {
                         .find(|fk| fk.from_col == col.name)?;
                     let abs_row = g.viewport_start + g.focused_row as i64;
                     let cell_val = g.window.get_row(abs_row)?.get(col_idx)?.clone();
-                    let frame = JumpFrame {
-                        table: g.table_name.clone(),
-                        row: g.focused_row as i64,
-                        col: col_idx,
-                    };
-                    Some((fk.to_table.clone(), fk.to_col.clone(), cell_val, frame))
+                    let sort = g.sort.as_ref().and_then(|s| {
+                        g.columns
+                            .get(s.col_idx)
+                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                    });
+                    Some((
+                        g.table_name.clone(),
+                        abs_row,
+                        col_idx,
+                        sort,
+                        g.filter.clone(),
+                        fk.to_table.clone(),
+                        fk.to_col.clone(),
+                        cell_val,
+                    ))
                 });
 
-                if let Some((to_table, to_col, cell_val, frame)) = jump_info {
+                if let Some((
+                    from_table,
+                    abs_row,
+                    from_col,
+                    from_sort,
+                    from_filter,
+                    to_table,
+                    to_col,
+                    cell_val,
+                )) = jump_info
+                {
+                    let Some(source_rowid) =
+                        self.resolve_rowid_at_offset(&from_table, abs_row, from_sort, from_filter)
+                    else {
+                        self.dirty = true;
+                        return;
+                    };
+                    let frame = JumpFrame {
+                        table: from_table,
+                        rowid: source_rowid,
+                        col: from_col,
+                    };
                     self.jump_stack.push(frame);
                     let _ = self.tx.send(Message::OpenTable(to_table.clone()));
                     let pool = Arc::clone(&self.pool);
@@ -1056,13 +1069,14 @@ impl App {
                             let _ = tx.send(Message::JumpToTargetRow {
                                 table: to_table,
                                 rowid,
+                                col: None,
                             });
                         }
                     });
                 }
                 self.dirty = true;
             }
-            Message::JumpToTargetRow { table, rowid } => self.jump_to_rowid(table, rowid),
+            Message::JumpToTargetRow { table, rowid, col } => self.jump_to_rowid(table, rowid, col),
             Message::CycleSort => {
                 let maybe_fetch = if let Some(ref mut grid) = self.grid {
                     let col_idx = grid.focused_col;
@@ -1220,7 +1234,8 @@ impl App {
                     let _ = self.tx.send(Message::OpenTable(frame.table.clone()));
                     let _ = self.tx.send(Message::JumpToTargetRow {
                         table: frame.table,
-                        rowid: frame.row + 1,
+                        rowid: frame.rowid,
+                        col: Some(frame.col),
                     });
                 }
                 self.dirty = true;
@@ -2710,35 +2725,53 @@ impl App {
         self.dirty = true;
     }
 
-    fn jump_to_rowid(&mut self, table: String, rowid: i64) {
-        let maybe_fetch = if let Some(ref mut grid) = self.grid {
+    fn jump_to_rowid(&mut self, table: String, rowid: i64, col: Option<usize>) {
+        let same_table_context = self.grid.as_ref().and_then(|grid| {
             if grid.table_name == table {
-                grid.scroll_to_row(rowid - 1);
-                if grid.needs_fetch && !grid.window.fetch_in_flight {
-                    grid.window.fetch_in_flight = true;
-                    grid.needs_fetch = false;
-                    let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                    let sort = grid.sort.as_ref().and_then(|s| {
-                        grid.columns
-                            .get(s.col_idx)
-                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
-                    });
-                    Some((
-                        grid.table_name.clone(),
-                        grid.columns.clone(),
-                        sort,
-                        off,
-                        lim,
-                    ))
-                } else {
-                    None
-                }
+                let sort = grid.sort.as_ref().and_then(|s| {
+                    grid.columns
+                        .get(s.col_idx)
+                        .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                });
+                Some((sort, grid.filter.clone(), col.unwrap_or(grid.focused_col)))
             } else {
-                self.pending_jump_target = Some((table, rowid));
+                None
+            }
+        });
+
+        let Some((sort, filter, target_col)) = same_table_context else {
+            self.pending_jump_target = Some(PendingJumpTarget { table, rowid, col });
+            self.dirty = true;
+            return;
+        };
+
+        let Some(target_row) = self.resolve_offset_for_rowid(&table, rowid, sort, filter) else {
+            self.dirty = true;
+            return;
+        };
+
+        let maybe_fetch = if let Some(ref mut grid) = self.grid {
+            grid.focus_cell(target_row as usize, target_col);
+            if grid.needs_fetch && !grid.window.fetch_in_flight {
+                grid.window.fetch_in_flight = true;
+                grid.needs_fetch = false;
+                let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                let sort = grid.sort.as_ref().and_then(|s| {
+                    grid.columns
+                        .get(s.col_idx)
+                        .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                });
+                Some((
+                    grid.table_name.clone(),
+                    grid.columns.clone(),
+                    sort,
+                    off,
+                    lim,
+                ))
+            } else {
                 None
             }
         } else {
-            self.pending_jump_target = Some((table, rowid));
             None
         };
 
@@ -2746,6 +2779,82 @@ impl App {
             self.spawn_window_fetch(&table, &cols, sort, off, lim);
         }
         self.dirty = true;
+    }
+
+    fn resolve_rowid_at_offset(
+        &mut self,
+        table: &str,
+        offset: i64,
+        sort: Option<(String, bool)>,
+        filter: crate::filter::FilterSet,
+    ) -> Option<i64> {
+        let (where_clause, where_params) = filter_to_sql(&filter);
+        let conn = match self.pool.get() {
+            Ok(conn) => conn,
+            Err(err) => {
+                self.toast
+                    .push(format!("DB connection failed: {}", err), ToastKind::Error);
+                return None;
+            }
+        };
+        match db::fetch_rowid_at_offset(
+            &conn,
+            table,
+            offset,
+            sort.as_ref().map(|(col, asc)| (col.as_str(), *asc)),
+            &where_clause,
+            &where_params,
+        ) {
+            Ok(Some(rowid)) => Some(rowid),
+            Ok(None) => {
+                self.toast
+                    .push("Row not found in current view", ToastKind::Error);
+                None
+            }
+            Err(err) => {
+                self.toast
+                    .push(format!("Row lookup failed: {}", err), ToastKind::Error);
+                None
+            }
+        }
+    }
+
+    fn resolve_offset_for_rowid(
+        &mut self,
+        table: &str,
+        rowid: i64,
+        sort: Option<(String, bool)>,
+        filter: crate::filter::FilterSet,
+    ) -> Option<i64> {
+        let (where_clause, where_params) = filter_to_sql(&filter);
+        let conn = match self.pool.get() {
+            Ok(conn) => conn,
+            Err(err) => {
+                self.toast
+                    .push(format!("DB connection failed: {}", err), ToastKind::Error);
+                return None;
+            }
+        };
+        match db::fetch_offset_for_rowid(
+            &conn,
+            table,
+            rowid,
+            sort.as_ref().map(|(col, asc)| (col.as_str(), *asc)),
+            &where_clause,
+            &where_params,
+        ) {
+            Ok(Some(offset)) => Some(offset),
+            Ok(None) => {
+                self.toast
+                    .push("Row not found in current view", ToastKind::Error);
+                None
+            }
+            Err(err) => {
+                self.toast
+                    .push(format!("Row lookup failed: {}", err), ToastKind::Error);
+                None
+            }
+        }
     }
 
     fn apply_column_filter(&mut self, col_name: String, col_filter: crate::filter::ColumnFilter) {
