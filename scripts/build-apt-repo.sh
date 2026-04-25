@@ -4,7 +4,7 @@ set -euo pipefail
 
 DEB_FILE="${1:?usage: build-apt-repo.sh <deb-file> [output-dir] [repo-url]}"
 OUTPUT_DIR="${2:-apt-repo}"
-REPO_URL="${3:-https://mendrik-private.github.io/sqlight}"
+REPO_URL="${3:-https://mendrik-private.github.io/sqv}"
 
 PACKAGE_NAME="$(dpkg-deb -f "${DEB_FILE}" Package)"
 ARCH="$(dpkg-deb -f "${DEB_FILE}" Architecture)"

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Keyboard-first terminal SQLite viewer"
 readme = "README.md"
-repository = "https://github.com/mendrik-private/sqlight"
-homepage = "https://github.com/mendrik-private/sqlight"
+repository = "https://github.com/mendrik-private/sqv"
+homepage = "https://github.com/mendrik-private/sqv"
 keywords = ["sqlite", "tui", "terminal", "database"]
 categories = ["command-line-utilities", "database"]
 

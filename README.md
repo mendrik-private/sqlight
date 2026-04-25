@@ -19,7 +19,7 @@
 The project publishes an `amd64` Debian package to a GitHub-hosted apt repository.
 
 ```bash
-echo "deb [trusted=yes arch=amd64] https://mendrik-private.github.io/sqlight stable main" \
+echo "deb [trusted=yes arch=amd64] https://mendrik-private.github.io/sqv stable main" \
   | sudo tee /etc/apt/sources.list.d/sqv.list
 sudo apt update
 sudo apt install sqv
@@ -33,7 +33,7 @@ Download the latest Linux binary archive from GitHub Releases and install it int
 
 ```bash
 curl -fsSL -o sqv-linux-x86_64.tar.gz \
-  https://github.com/mendrik-private/sqlight/releases/latest/download/sqv-linux-x86_64.tar.gz
+  https://github.com/mendrik-private/sqv/releases/latest/download/sqv-linux-x86_64.tar.gz
 tar -xzf sqv-linux-x86_64.tar.gz
 sudo install -m 0755 sqv /usr/local/bin/sqv
 ```
@@ -130,10 +130,10 @@ GitHub Actions provides:
 
 1. **CI** on pushes and pull requests: format check, clippy, and tests
 2. **Tagged releases** on `v*` tags:
-   - build the release binary
-   - build a Debian package
-   - publish GitHub Release assets
-   - publish an apt repository to GitHub Pages
+    - build the release binary
+    - build a Debian package
+    - publish GitHub Release assets
+    - publish an apt repository to GitHub Pages
 
 To cut a release:
 
@@ -141,3 +141,5 @@ To cut a release:
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+Before the first tagged release, enable **GitHub Pages** for the repository so the apt repository can be deployed from GitHub Actions. Tagged releases now wait for a successful Pages deployment before publishing release assets.
