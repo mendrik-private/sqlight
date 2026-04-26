@@ -94,6 +94,7 @@ type GridFetchResult = (
 );
 
 const VALUE_PICKER_DISTINCT_LIMIT: usize = 100;
+const ENUM_COLOR_DISTINCT_LIMIT: usize = 20;
 
 struct GridDataReadyPayload {
     table: String,
@@ -2822,18 +2823,14 @@ impl App {
                 let enumerated_values = cols_c
                     .iter()
                     .map(|col| {
-                        db::load_distinct_values(&conn, &table_c, &col.name, 20)
-                            .map(|values| {
-                                if !values.is_empty()
-                                    && values.len() < 20
-                                    && values.iter().all(|value| value.chars().count() <= 20)
-                                {
-                                    values
-                                } else {
-                                    Vec::new()
-                                }
-                            })
-                            .unwrap_or_default()
+                        db::load_distinct_values(
+                            &conn,
+                            &table_c,
+                            &col.name,
+                            ENUM_COLOR_DISTINCT_LIMIT,
+                        )
+                        .map(|values| normalize_enumerated_values(values, total))
+                        .unwrap_or_default()
                     })
                     .collect();
                 let width_sample_rows = db::fetch_random_rows(&conn, &table_c, &cols_c, 50)
@@ -3200,6 +3197,18 @@ fn should_use_value_picker(values: &[String]) -> bool {
     !values.is_empty() && values.len() <= VALUE_PICKER_DISTINCT_LIMIT
 }
 
+fn normalize_enumerated_values(values: Vec<String>, total_rows: i64) -> Vec<String> {
+    if values.is_empty()
+        || values.len() >= ENUM_COLOR_DISTINCT_LIMIT
+        || values.iter().any(|value| value.chars().count() > 20)
+        || (total_rows > 0 && values.len() as i64 == total_rows)
+    {
+        Vec::new()
+    } else {
+        values
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3281,6 +3290,20 @@ mod tests {
 
     fn make_viewport_rows(app: &App) -> usize {
         app.grid.as_ref().map_or(20, |g| g.window.viewport_rows)
+    }
+
+    #[test]
+    fn normalize_enumerated_values_skips_unique_columns() {
+        let values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        assert!(normalize_enumerated_values(values, 3).is_empty());
+    }
+
+    #[test]
+    fn normalize_enumerated_values_keeps_repeated_short_values() {
+        let values = vec!["pending".to_string(), "done".to_string()];
+
+        assert_eq!(normalize_enumerated_values(values.clone(), 5), values);
     }
 
     fn try_recv_variant(rx: &mut mpsc::UnboundedReceiver<Message>) -> String {
