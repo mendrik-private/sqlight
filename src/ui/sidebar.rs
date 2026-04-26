@@ -326,7 +326,7 @@ fn render_scrollbar(
     for row in 0..track_height {
         let y = area.y + row as u16;
         let style = if row >= thumb_top && row < thumb_top + thumb_height {
-            Style::default().fg(theme.accent).bg(theme.bg_soft)
+            Style::default().fg(theme.fg_mute).bg(theme.bg_soft)
         } else {
             Style::default().fg(theme.line).bg(theme.bg_soft)
         };

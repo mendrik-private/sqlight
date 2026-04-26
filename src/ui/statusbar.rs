@@ -232,6 +232,8 @@ fn action_hint_text(app: &App) -> Option<String> {
         FocusPane::Grid => {
             if app.grid.is_some() && !app.readonly {
                 hints.push("[enter] edit".to_string());
+                hints.push("[i] add row".to_string());
+                hints.push("[d] delete row".to_string());
             }
             if app.grid.is_some() {
                 hints.push("[s] sort".to_string());
@@ -264,6 +266,95 @@ fn action_hint_text(app: &App) -> Option<String> {
         None
     } else {
         Some(hints.join("  "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use r2d2_sqlite::SqliteConnectionManager;
+    use tokio::sync::mpsc;
+
+    use super::action_hint_text;
+    use crate::{
+        app::{App, FocusPane},
+        config::Config,
+        db::{self, schema::Column, types::SqlValue},
+        grid::{GridInit, GridState},
+    };
+
+    fn make_test_app() -> App {
+        let manager = SqliteConnectionManager::memory();
+        let pool = Arc::new(
+            r2d2::Pool::builder()
+                .max_size(1)
+                .build(manager)
+                .expect("test pool"),
+        );
+        let conn = pool.get().expect("test conn");
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, email TEXT);",
+        )
+        .expect("seed schema");
+        let schema = db::load_schema(&conn).expect("load schema");
+        drop(conn);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(
+            schema,
+            Config::default(),
+            pool,
+            tx,
+            false,
+            ":memory:".to_string(),
+        )
+    }
+
+    fn make_grid() -> GridState {
+        let columns = vec![
+            Column {
+                cid: 0,
+                name: "id".to_string(),
+                col_type: "INTEGER".to_string(),
+                not_null: false,
+                default_value: None,
+                is_pk: true,
+            },
+            Column {
+                cid: 1,
+                name: "name".to_string(),
+                col_type: "TEXT".to_string(),
+                not_null: false,
+                default_value: None,
+                is_pk: false,
+            },
+        ];
+        GridState::new(GridInit {
+            table_name: "users".to_string(),
+            columns,
+            fk_cols: vec![false; 2],
+            enumerated_values: vec![Vec::new(); 2],
+            rows: vec![vec![
+                SqlValue::Integer(1),
+                SqlValue::Text("Alice".to_string()),
+            ]],
+            width_sample_rows: vec![],
+            total_rows: 1,
+            area_width: 40,
+        })
+    }
+
+    #[test]
+    fn grid_hints_include_row_actions_when_writable() {
+        let mut app = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+
+        let hints = action_hint_text(&app).expect("grid hints");
+
+        assert!(hints.contains("[i] add row"));
+        assert!(hints.contains("[d] delete row"));
     }
 }
 

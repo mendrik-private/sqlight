@@ -422,7 +422,7 @@ fn render_scrollbar(
             area.x,
             area.y + row as u16,
             "█",
-            Style::default().fg(theme.accent).bg(theme.bg_raised),
+            Style::default().fg(theme.fg_mute).bg(theme.bg_raised),
         );
     }
 }

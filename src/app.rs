@@ -19,7 +19,7 @@ use crate::{
     ui::{
         popup::{
             CommandPaletteState, DateFocus, DatePickerState, DatetimeFocus, DatetimePickerState,
-            FilterPopupState, FkPickerState, PaletteCommand, PopupKind, TextEditorState,
+            FilterPopupState, FkPickerState, HelpState, PaletteCommand, PopupKind, TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
         tabbar::TabMouseAction,
@@ -82,6 +82,10 @@ pub struct PendingConfirm {
     pub timeout_secs: u64,
 }
 
+struct GridScrollbarDrag {
+    grab_offset: i64,
+}
+
 type GridFetchResult = (
     Vec<Vec<SqlValue>>,
     i64,
@@ -127,11 +131,13 @@ pub struct App {
     pub grid_outer_area: Option<Rect>,
     pub grid_inner_area: Option<Rect>,
     pub pending_jump_target: Option<PendingJumpTarget>,
+    grid_scrollbar_drag: Option<GridScrollbarDrag>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum Message {
     Quit,
     Key(crossterm::event::KeyEvent),
@@ -219,6 +225,7 @@ pub enum Message {
         rowid: i64,
     },
     OpenCommandPalette,
+    OpenHelp,
     ExecuteCommand(PaletteCommand),
     ExportDone {
         format: String,
@@ -265,6 +272,7 @@ impl App {
             grid_outer_area: None,
             grid_inner_area: None,
             pending_jump_target: None,
+            grid_scrollbar_drag: None,
             pool,
             tx,
         }
@@ -393,33 +401,7 @@ impl App {
                 self.dirty = true;
             }
             Message::ScrollToRow(i) => {
-                let maybe_fetch = if let Some(ref mut grid) = self.grid {
-                    grid.scroll_to_row(i);
-                    if grid.needs_fetch && !grid.window.fetch_in_flight {
-                        grid.window.fetch_in_flight = true;
-                        grid.needs_fetch = false;
-                        let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
-                        let sort = grid.sort.as_ref().and_then(|s| {
-                            grid.columns
-                                .get(s.col_idx)
-                                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
-                        });
-                        Some((
-                            grid.table_name.clone(),
-                            grid.columns.clone(),
-                            sort,
-                            off,
-                            lim,
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
-                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
-                }
+                self.scroll_grid_to_row(i);
                 self.dirty = true;
             }
             Message::ScrollToEnd => {
@@ -884,6 +866,7 @@ impl App {
                     }),
                     PopupKind::FilterPopup(_) => None,
                     PopupKind::CommandPalette(_) => None,
+                    PopupKind::Help(_) => None,
                 });
                 if let Some((table, col, rowid, value, original)) = write_info {
                     let pool = Arc::clone(&self.pool);
@@ -1577,6 +1560,11 @@ impl App {
                 self.mode = AppMode::Edit;
                 self.dirty = true;
             }
+            Message::OpenHelp => {
+                self.popup = Some(PopupKind::Help(HelpState::new()));
+                self.mode = AppMode::Edit;
+                self.dirty = true;
+            }
             Message::ExecuteCommand(cmd) => {
                 self.execute_palette_command(cmd);
                 self.dirty = true;
@@ -1731,12 +1719,6 @@ impl App {
             PaletteCommand::Quit => {
                 self.should_quit = true;
             }
-            PaletteCommand::OpenDb => {
-                self.toast.push(
-                    "Use --path argument to open a different DB",
-                    ToastKind::Info,
-                );
-            }
         }
     }
 
@@ -1795,6 +1777,16 @@ impl App {
                 if self.mouse_scroll_panel(x, y, 3, false) {
                     self.dirty = true;
                 }
+                return;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.drag_grid_scrollbar(y) {
+                    self.dirty = true;
+                }
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.grid_scrollbar_drag = None;
                 return;
             }
             _ => {}
@@ -1866,7 +1858,12 @@ impl App {
                             crate::grid::GridHit::AlphabetRail(letter) => {
                                 let _ = self.tx.send(Message::JumpToLetter(letter));
                             }
-                            crate::grid::GridHit::Scrollbar => {}
+                            crate::grid::GridHit::Scrollbar => {
+                                if self.begin_grid_scrollbar_drag(area, y) {
+                                    self.dirty = true;
+                                }
+                                return;
+                            }
                         }
                     }
                 }
@@ -2003,6 +2000,36 @@ impl App {
         }
     }
 
+    fn scroll_grid_to_row(&mut self, row: i64) {
+        let maybe_fetch = if let Some(ref mut grid) = self.grid {
+            grid.scroll_to_row(row);
+            if grid.needs_fetch && !grid.window.fetch_in_flight {
+                grid.window.fetch_in_flight = true;
+                grid.needs_fetch = false;
+                let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                let sort = grid.sort.as_ref().and_then(|s| {
+                    grid.columns
+                        .get(s.col_idx)
+                        .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                });
+                Some((
+                    grid.table_name.clone(),
+                    grid.columns.clone(),
+                    sort,
+                    off,
+                    lim,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+            self.spawn_window_fetch(&table, &cols, sort, off, lim);
+        }
+    }
+
     fn scroll_grid_up(&mut self, n: usize) {
         let maybe_fetch = if let Some(ref mut grid) = self.grid {
             grid.scroll_up(n);
@@ -2033,6 +2060,46 @@ impl App {
         }
     }
 
+    fn begin_grid_scrollbar_drag(&mut self, area: Rect, y: u16) -> bool {
+        let Some((grab_offset, target_row)) = self
+            .grid
+            .as_ref()
+            .and_then(|grid| crate::grid::scrollbar_drag_start(area, grid, y))
+        else {
+            return false;
+        };
+
+        self.focus = FocusPane::Grid;
+        self.grid_scrollbar_drag = Some(GridScrollbarDrag { grab_offset });
+        self.scroll_grid_to_row(target_row);
+        true
+    }
+
+    fn drag_grid_scrollbar(&mut self, y: u16) -> bool {
+        let Some(area) = self.grid_inner_area else {
+            self.grid_scrollbar_drag = None;
+            return false;
+        };
+        let Some(grab_offset) = self
+            .grid_scrollbar_drag
+            .as_ref()
+            .map(|drag| drag.grab_offset)
+        else {
+            return false;
+        };
+        let Some(target_row) = self
+            .grid
+            .as_ref()
+            .and_then(|grid| crate::grid::scrollbar_drag_target_row(area, grid, y, grab_offset))
+        else {
+            return false;
+        };
+
+        self.focus = FocusPane::Grid;
+        self.scroll_grid_to_row(target_row);
+        true
+    }
+
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -2049,6 +2116,16 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // ? toggles help (from any mode, unless confirming)
+        if key.code == KeyCode::Char('?') {
+            if matches!(self.popup, Some(PopupKind::Help(_))) {
+                let _ = self.tx.send(Message::ClosePopup);
+            } else {
+                let _ = self.tx.send(Message::OpenHelp);
+            }
+            return;
         }
 
         match self.mode {
@@ -2517,6 +2594,28 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     state.pop_char();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::Help(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Up => {
+                    state.scroll_up(3);
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    state.scroll_down(3);
+                    self.dirty = true;
+                }
+                KeyCode::PageUp => {
+                    state.scroll_up(10);
+                    self.dirty = true;
+                }
+                KeyCode::PageDown => {
+                    state.scroll_down(10);
                     self.dirty = true;
                 }
                 _ => {}
@@ -3103,7 +3202,844 @@ fn should_use_value_picker(values: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_use_value_picker;
+    use std::sync::Arc;
+
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use r2d2_sqlite::SqliteConnectionManager;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::{
+        config::Config,
+        db::{self, schema::Column, types::SqlValue},
+        ui::popup::HelpState,
+    };
+
+    // ---------- helpers ----------
+
+    fn make_test_app() -> (App, mpsc::UnboundedReceiver<Message>) {
+        let manager = SqliteConnectionManager::memory();
+        let pool = Arc::new(
+            r2d2::Pool::builder()
+                .max_size(1)
+                .build(manager)
+                .expect("test pool"),
+        );
+        let conn = pool.get().expect("test conn");
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER, email TEXT);",
+        )
+        .expect("seed schema");
+        let schema = db::load_schema(&conn).expect("load schema");
+        drop(conn);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let config = Config::default();
+        let app = App::new(schema, config, pool, tx, false, ":memory:".to_string());
+        (app, rx)
+    }
+
+    fn dummy_column(cid: i64, name: &str, col_type: &str) -> Column {
+        Column {
+            cid,
+            name: name.to_string(),
+            col_type: col_type.to_string(),
+            not_null: false,
+            default_value: None,
+            is_pk: cid == 0,
+        }
+    }
+
+    fn make_grid() -> crate::grid::GridState {
+        let columns = vec![
+            dummy_column(0, "id", "INTEGER"),
+            dummy_column(1, "name", "TEXT"),
+            dummy_column(2, "age", "INTEGER"),
+            dummy_column(3, "email", "TEXT"),
+        ];
+        let rows: Vec<Vec<SqlValue>> = (0..50)
+            .map(|i| {
+                vec![
+                    SqlValue::Integer(i),
+                    SqlValue::Text(format!("user-{i}")),
+                    SqlValue::Integer(20 + i % 40),
+                    SqlValue::Text(format!("user{}@example.com", i)),
+                ]
+            })
+            .collect();
+        crate::grid::GridState::new(crate::grid::GridInit {
+            table_name: "users".to_string(),
+            columns,
+            fk_cols: vec![false; 4],
+            enumerated_values: vec![Vec::new(); 4],
+            rows,
+            width_sample_rows: vec![Vec::new(); 4],
+            total_rows: 50,
+            area_width: 80,
+        })
+    }
+
+    fn make_viewport_rows(app: &App) -> usize {
+        app.grid.as_ref().map_or(20, |g| g.window.viewport_rows)
+    }
+
+    fn try_recv_variant(rx: &mut mpsc::UnboundedReceiver<Message>) -> String {
+        let msg = rx.try_recv();
+        match msg {
+            Ok(m) => format!("{:?}", m),
+            Err(_) => "no message".to_string(),
+        }
+    }
+
+    /// Drain channel and process messages through app.update().
+    fn drain_messages(app: &mut App, rx: &mut mpsc::UnboundedReceiver<Message>) {
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    // avoid infinite recursion for actions that spawn more messages
+                    app.update(msg);
+                    if rx.try_recv().is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    // ---------- global shortcuts ----------
+
+    #[test]
+    fn ctrl_q_sets_should_quit() {
+        let (mut app, _rx) = make_test_app();
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_b_toggles_sidebar() {
+        let (mut app, _rx) = make_test_app();
+        assert!(app.sidebar_visible);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!app.sidebar_visible);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.sidebar_visible);
+    }
+
+    #[test]
+    fn tab_toggles_focus_sidebar_to_grid() {
+        let (mut app, _rx) = make_test_app();
+        app.sidebar_visible = true;
+        app.focus = FocusPane::Sidebar;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(app.focus, FocusPane::Grid));
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(app.focus, FocusPane::Sidebar));
+    }
+
+    #[test]
+    fn backtab_toggles_focus() {
+        let (mut app, _rx) = make_test_app();
+        app.sidebar_visible = true;
+        app.focus = FocusPane::Sidebar;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(app.focus, FocusPane::Grid));
+    }
+
+    #[test]
+    fn question_mark_opens_and_closes_help() {
+        let (mut app, mut rx) = make_test_app();
+        assert!(app.popup.is_none());
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::SHIFT,
+        )));
+        drain_messages(&mut app, &mut rx);
+        assert!(
+            matches!(app.popup, Some(PopupKind::Help(_))),
+            "popup should be Help"
+        );
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::SHIFT,
+        )));
+        drain_messages(&mut app, &mut rx);
+        assert!(app.popup.is_none(), "popup should be closed after second ?");
+    }
+
+    #[test]
+    fn ctrl_p_opens_command_palette() {
+        let (mut app, mut rx) = make_test_app();
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        )));
+        drain_messages(&mut app, &mut rx);
+        assert!(
+            matches!(app.popup, Some(PopupKind::CommandPalette(_))),
+            "popup should be CommandPalette"
+        );
+    }
+
+    #[test]
+    fn esc_in_help_closes_popup() {
+        let (mut app, mut rx) = make_test_app();
+        app.popup = Some(PopupKind::Help(HelpState::new()));
+        app.mode = AppMode::Edit;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        drain_messages(&mut app, &mut rx);
+        assert!(app.popup.is_none(), "help popup should be closed");
+    }
+
+    #[test]
+    fn ctrl_enter_in_help_is_noop() {
+        let (mut app, mut rx) = make_test_app();
+        app.popup = Some(PopupKind::Help(HelpState::new()));
+        app.mode = AppMode::Edit;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+        // no CommitEdit sent for Help popup
+        assert!(rx.try_recv().is_err());
+    }
+
+    // ---------- grid navigation shortcuts ----------
+
+    #[test]
+    fn arrow_down_sends_move_down() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveDown");
+    }
+
+    #[test]
+    fn arrow_up_sends_move_up() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveUp");
+    }
+
+    #[test]
+    fn arrow_left_sends_move_left() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveLeft");
+    }
+
+    #[test]
+    fn arrow_right_sends_move_right() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveRight");
+    }
+
+    #[test]
+    fn vim_hjkl_navigation() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+
+        // h = left
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveLeft");
+
+        // l = right
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveRight");
+
+        // k = up
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveUp");
+
+        // j (non-FK) = down
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveDown");
+    }
+
+    #[test]
+    fn home_sends_move_col_first() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveColFirst");
+    }
+
+    #[test]
+    fn end_sends_move_col_last() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveColLast");
+    }
+
+    #[test]
+    fn ctrl_home_sends_move_first_cell() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveFirstCell");
+    }
+
+    #[test]
+    fn ctrl_end_sends_move_last_cell() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "MoveLastCell");
+    }
+
+    #[test]
+    fn page_down_scrolls_viewport() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        let vp = make_viewport_rows(&app).saturating_sub(1);
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+        let msg = try_recv_variant(&mut rx);
+        assert_eq!(
+            msg,
+            format!("ScrollDown({})", vp),
+            "expected ScrollDown({}), got {}",
+            vp,
+            msg
+        );
+    }
+
+    #[test]
+    fn page_up_scrolls_viewport() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        let vp = make_viewport_rows(&app).saturating_sub(1);
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        )));
+        let msg = try_recv_variant(&mut rx);
+        assert_eq!(
+            msg,
+            format!("ScrollUp({})", vp),
+            "expected ScrollUp({}), got {}",
+            vp,
+            msg
+        );
+    }
+
+    #[test]
+    fn ctrl_up_scrolls_viewport() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        let vp = make_viewport_rows(&app).saturating_sub(1);
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::CONTROL,
+        )));
+        let msg = try_recv_variant(&mut rx);
+        assert_eq!(
+            msg,
+            format!("ScrollUp({})", vp),
+            "expected ScrollUp({}), got {}",
+            vp,
+            msg
+        );
+    }
+
+    #[test]
+    fn ctrl_down_scrolls_viewport() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        let vp = make_viewport_rows(&app).saturating_sub(1);
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::CONTROL,
+        )));
+        let msg = try_recv_variant(&mut rx);
+        assert_eq!(
+            msg,
+            format!("ScrollDown({})", vp),
+            "expected ScrollDown({}), got {}",
+            vp,
+            msg
+        );
+    }
+
+    // ---------- sort and filter shortcuts ----------
+
+    #[test]
+    fn s_key_sends_cycle_sort() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "CycleSort");
+    }
+
+    #[test]
+    fn f_key_sends_open_filter_popup() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "OpenFilterPopup");
+    }
+
+    #[test]
+    fn shift_f_sends_clear_filters() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('F'),
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "ClearFilters");
+    }
+
+    #[test]
+    fn j_on_fk_col_sends_jump_to_fk() {
+        let (mut app, mut rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.fk_cols[1] = true; // name col is FK
+        grid.focused_col = 1; // focus the FK column
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "JumpToFk");
+    }
+
+    #[test]
+    fn esc_in_grid_sets_focus_to_sidebar() {
+        let (mut app, _rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(app.focus, FocusPane::Sidebar));
+    }
+
+    #[test]
+    fn backspace_with_jump_stack_sends_jump_back() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.jump_stack.push(JumpFrame {
+            table: "users".to_string(),
+            rowid: 1,
+            col: 0,
+        });
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "JumpBack");
+    }
+
+    #[test]
+    fn backspace_without_jump_stack_is_noop() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        assert!(app.jump_stack.is_empty());
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        // no JumpBack should be sent
+        let msg = try_recv_variant(&mut rx);
+        assert!(!msg.contains("JumpBack"), "unexpected: {}", msg);
+    }
+
+    // ---------- editing shortcuts ----------
+
+    #[test]
+    fn i_key_in_grid_sends_insert_row() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "InsertRow");
+    }
+
+    #[test]
+    fn d_key_in_grid_shows_confirm_dialog() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        )));
+        // sends DeleteRow - confirm dialog appears as side-effect
+        assert_eq!(try_recv_variant(&mut rx), "DeleteRow");
+    }
+
+    #[test]
+    fn ctrl_z_sends_undo_action() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "UndoAction");
+    }
+
+    #[test]
+    fn enter_in_grid_sends_open_popup() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "OpenPopup");
+    }
+
+    // ---------- sidebar shortcuts ----------
+
+    #[test]
+    fn enter_in_sidebar_opens_table() {
+        let (mut app, mut rx) = make_test_app();
+        app.focus = FocusPane::Sidebar;
+        // navigate to first table entry
+        app.sidebar.move_down(&app.schema);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let msg = try_recv_variant(&mut rx);
+        assert!(msg.contains("OpenTable"), "expected OpenTable, got {}", msg);
+    }
+
+    #[test]
+    fn up_down_arrows_in_sidebar_navigate() {
+        let (mut app, _rx) = make_test_app();
+        let initial = app.sidebar.selected;
+        app.focus = FocusPane::Sidebar;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_ne!(app.sidebar.selected, initial);
+    }
+
+    // ---------- letter jumps ----------
+
+    #[test]
+    fn letter_key_on_text_sorted_column_sends_jump_to_letter() {
+        let (mut app, mut rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.sort = Some(SortSpec {
+            col_idx: 1,
+            direction: SortDir::Asc,
+        }); // name is TEXT -> text sort
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "JumpToLetter('a')");
+    }
+
+    #[test]
+    fn hash_key_on_text_sorted_column_sends_jump_to_letter() {
+        let (mut app, mut rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.sort = Some(SortSpec {
+            col_idx: 1,
+            direction: SortDir::Asc,
+        });
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('#'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "JumpToLetter('#')");
+    }
+
+    #[test]
+    fn letter_key_without_text_sort_does_nothing() {
+        let (mut app, mut rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.sort = None; // no sort
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        let msg = try_recv_variant(&mut rx);
+        assert!(!msg.contains("JumpToLetter"), "unexpected: {}", msg);
+    }
+
+    // ---------- help popup navigation ----------
+
+    #[test]
+    fn help_scroll_up_and_down() {
+        let mut state = HelpState::new();
+        // simulate large viewport so scroll is visible
+        state.max_scroll = 10;
+        state.scroll_down(3);
+        assert_eq!(state.scroll, 3);
+        state.scroll_up(2);
+        assert_eq!(state.scroll, 1);
+        state.scroll_up(5);
+        assert_eq!(state.scroll, 0); // clamps at 0
+        state.scroll_down(100);
+        assert_eq!(state.scroll, 9); // clamps at max_scroll-1
+    }
+
+    #[test]
+    fn help_up_down_keys_scroll_in_edit_mode() {
+        let (mut app, _rx) = make_test_app();
+        let mut state = HelpState::new();
+        state.max_scroll = 10;
+        app.popup = Some(PopupKind::Help(state));
+        app.mode = AppMode::Edit;
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(&app.popup, Some(PopupKind::Help(s)) if s.scroll == 3));
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(&app.popup, Some(PopupKind::Help(s)) if s.scroll == 0));
+    }
+
+    #[test]
+    fn help_page_up_down_scrolls_faster() {
+        let (mut app, _rx) = make_test_app();
+        let mut state = HelpState::new();
+        state.max_scroll = 30;
+        app.popup = Some(PopupKind::Help(state));
+        app.mode = AppMode::Edit;
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(&app.popup, Some(PopupKind::Help(s)) if s.scroll == 10));
+    }
+
+    // ---------- confirm dialog ----------
+
+    #[test]
+    fn y_confirm_and_n_cancel_in_confirm_dialog() {
+        let (mut app, mut rx) = make_test_app();
+        app.pending_confirm = Some(PendingConfirm {
+            message: "Delete?".to_string(),
+            kind: ConfirmKind::DeleteRow {
+                table: "users".to_string(),
+                rowid: 42,
+            },
+            created: std::time::Instant::now(),
+            timeout_secs: 5,
+        });
+
+        // n cancels
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE,
+        )));
+        drain_messages(&mut app, &mut rx);
+        assert!(app.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn esc_cancels_confirm_dialog() {
+        let (mut app, mut rx) = make_test_app();
+        app.pending_confirm = Some(PendingConfirm {
+            message: "Delete?".to_string(),
+            kind: ConfirmKind::DeleteRow {
+                table: "users".to_string(),
+                rowid: 42,
+            },
+            created: std::time::Instant::now(),
+            timeout_secs: 5,
+        });
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        drain_messages(&mut app, &mut rx);
+        assert!(app.pending_confirm.is_none());
+    }
+
+    // ---------- mouse handling ----------
+
+    // mouse scroll triggers async fetch which needs tokio runtime;
+    // tested instead via scroll shortcuts which verify scroll messages directly
+
+    #[test]
+    fn mouse_click_on_grid_focuses_grid() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.grid_inner_area = Some(ratatui::layout::Rect {
+            x: 12,
+            y: 8,
+            width: 56,
+            height: 16,
+        });
+        app.focus = FocusPane::Sidebar;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 20,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(matches!(app.focus, FocusPane::Grid));
+    }
+
+    #[test]
+    fn mouse_drag_on_grid_scrollbar_scrolls_rows() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.grid.as_mut().expect("grid").window.fetch_in_flight = true;
+        app.grid_inner_area = Some(ratatui::layout::Rect {
+            x: 12,
+            y: 8,
+            width: 20,
+            height: 13,
+        });
+        app.focus = FocusPane::Sidebar;
+        let _ = rx.try_recv(); // drain
+
+        app.update(Message::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 31,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let start_row = app.grid.as_ref().expect("grid").focused_row;
+        assert!(app.grid_scrollbar_drag.is_some());
+
+        app.update(Message::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 31,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let dragged_row = app.grid.as_ref().expect("grid").focused_row;
+
+        assert!(matches!(app.focus, FocusPane::Grid));
+        assert!(dragged_row > start_row);
+
+        app.update(Message::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 31,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.grid_scrollbar_drag.is_none());
+    }
+
+    // ---------- value picker tests (existing) ----------
 
     #[test]
     fn value_picker_allows_long_entries_when_distinct_set_is_small() {

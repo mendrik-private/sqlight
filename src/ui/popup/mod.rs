@@ -3,6 +3,7 @@ pub mod date_picker;
 pub mod datetime_picker;
 pub mod filter;
 pub mod fk_picker;
+pub mod help;
 pub mod text_editor;
 pub mod value_picker;
 
@@ -20,6 +21,7 @@ pub use date_picker::{DateFocus, DatePickerState};
 pub use datetime_picker::{DatetimeFocus, DatetimePickerState};
 pub use filter::FilterPopupState;
 pub use fk_picker::FkPickerState;
+pub use help::HelpState;
 pub use text_editor::TextEditorState;
 pub use value_picker::ValuePickerState;
 
@@ -32,6 +34,7 @@ pub enum PopupKind {
     FkPicker(FkPickerState),
     FilterPopup(FilterPopupState),
     CommandPalette(CommandPaletteState),
+    Help(HelpState),
 }
 
 pub(crate) fn paint_popup_surface(frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -71,5 +74,6 @@ pub fn render_popup(
         PopupKind::CommandPalette(state) => {
             command_palette::render(frame, area, state, theme, config)
         }
+        PopupKind::Help(state) => help::render(frame, area, state, theme, config),
     }
 }

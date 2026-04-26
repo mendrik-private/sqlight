@@ -93,7 +93,6 @@ sqv check-terminal
 | `s` | Cycle sort on focused column |
 | `f` | Open filter popup for focused column |
 | `Shift-F` | Clear filters |
-| `Ctrl-f` | Filter to rows like the focused cell |
 | `j` | Jump through a foreign key |
 | `Backspace` | Jump back |
 | `Ctrl-b` | Toggle sidebar |
@@ -138,8 +137,8 @@ GitHub Actions provides:
 To cut a release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Before the first tagged release, enable **GitHub Pages** for the repository so the apt repository can be deployed from GitHub Actions. Tagged releases now wait for a successful Pages deployment before publishing release assets.

@@ -481,9 +481,37 @@ fn compute_visible_cols(state: &GridState, data_width: u16) -> Vec<(usize, u16)>
         }
     }
 
-    if let Some((_, last_w)) = visible_cols.last_mut() {
-        if cumul < data_width {
-            *last_w = last_w.saturating_add(data_width - cumul);
+    if cumul < data_width {
+        let extra = data_width - cumul;
+        let text_cols: Vec<usize> = visible_cols
+            .iter()
+            .enumerate()
+            .filter_map(|(visible_idx, (col_idx, _))| {
+                matches!(
+                    affinity(&state.columns[*col_idx].col_type),
+                    ColAffinity::Text | ColAffinity::Blob
+                )
+                .then_some(visible_idx)
+            })
+            .collect();
+
+        let targets = if text_cols.is_empty() {
+            visible_cols
+                .is_empty()
+                .then(Vec::new)
+                .unwrap_or_else(|| vec![visible_cols.len() - 1])
+        } else {
+            text_cols
+        };
+
+        if !targets.is_empty() {
+            let base = extra / targets.len() as u16;
+            let remainder = extra % targets.len() as u16;
+            for (i, target_idx) in targets.into_iter().enumerate() {
+                visible_cols[target_idx].1 = visible_cols[target_idx]
+                    .1
+                    .saturating_add(base + u16::from(i < remainder as usize));
+            }
         }
     }
 
@@ -827,27 +855,28 @@ fn render_focused_border(
     }
 }
 
-fn render_vertical_scrollbar(buf: &mut Buffer, area: Rect, state: &GridState, theme: &Theme) {
+#[derive(Debug, Clone, Copy)]
+struct ScrollbarMetrics {
+    track_x: u16,
+    track_y_start: u16,
+    track_height: i64,
+    thumb_height: i64,
+    thumb_offset: i64,
+}
+
+fn vertical_scrollbar_metrics(area: Rect, state: &GridState) -> Option<ScrollbarMetrics> {
     let total = state.window.total_rows;
-    if total <= 0 {
-        return;
+    if total <= 0 || area.width == 0 {
+        return None;
     }
+
     let track_height = area.height.saturating_sub(HEADER_ROWS) as i64;
     if track_height <= 0 {
-        return;
+        return None;
     }
+
     let track_x = area.x + area.width - 1;
     let track_y_start = area.y + HEADER_ROWS;
-
-    for ty in 0..track_height {
-        buf.set_string(
-            track_x,
-            track_y_start + ty as u16,
-            "│",
-            Style::default().fg(theme.line_soft),
-        );
-    }
-
     let thumb_height = ((state.window.viewport_rows as i64 * track_height) / total.max(1))
         .max(1)
         .min(track_height);
@@ -857,14 +886,85 @@ fn render_vertical_scrollbar(buf: &mut Buffer, area: Rect, state: &GridState, th
         0
     };
     let max_thumb_offset = (track_height - thumb_height).max(0);
-    let thumb_offset = thumb_offset.clamp(0, max_thumb_offset);
 
-    for ty in 0..thumb_height {
-        let ty_abs = track_y_start + (thumb_offset + ty) as u16;
+    Some(ScrollbarMetrics {
+        track_x,
+        track_y_start,
+        track_height,
+        thumb_height,
+        thumb_offset: thumb_offset.clamp(0, max_thumb_offset),
+    })
+}
+
+fn render_vertical_scrollbar(buf: &mut Buffer, area: Rect, state: &GridState, theme: &Theme) {
+    let Some(metrics) = vertical_scrollbar_metrics(area, state) else {
+        return;
+    };
+
+    for ty in 0..metrics.track_height {
+        buf.set_string(
+            metrics.track_x,
+            metrics.track_y_start + ty as u16,
+            "│",
+            Style::default().fg(theme.line_soft),
+        );
+    }
+
+    for ty in 0..metrics.thumb_height {
+        let ty_abs = metrics.track_y_start + (metrics.thumb_offset + ty) as u16;
         if ty_abs < area.y + area.height {
-            buf.set_string(track_x, ty_abs, "█", Style::default().fg(theme.fg_dim));
+            buf.set_string(
+                metrics.track_x,
+                ty_abs,
+                "█",
+                Style::default().fg(theme.fg_mute),
+            );
         }
     }
+}
+
+pub(crate) fn scrollbar_drag_start(area: Rect, state: &GridState, y: u16) -> Option<(i64, i64)> {
+    let metrics = vertical_scrollbar_metrics(area, state)?;
+    if y < metrics.track_y_start || y >= metrics.track_y_start + metrics.track_height as u16 {
+        return None;
+    }
+
+    let thumb_top = metrics.track_y_start + metrics.thumb_offset as u16;
+    let thumb_bottom = thumb_top + metrics.thumb_height as u16;
+    let grab_offset = if y >= thumb_top && y < thumb_bottom {
+        i64::from(y - thumb_top)
+    } else {
+        metrics.thumb_height / 2
+    };
+
+    scrollbar_drag_target_row(area, state, y, grab_offset).map(|row| (grab_offset, row))
+}
+
+pub(crate) fn scrollbar_drag_target_row(
+    area: Rect,
+    state: &GridState,
+    y: u16,
+    grab_offset: i64,
+) -> Option<i64> {
+    let metrics = vertical_scrollbar_metrics(area, state)?;
+    if state.window.total_rows <= 1 {
+        return Some(0);
+    }
+
+    let max_thumb_offset = (metrics.track_height - metrics.thumb_height).max(0);
+    if max_thumb_offset == 0 {
+        return Some(0);
+    }
+
+    let pointer_offset = i64::from(y).saturating_sub(i64::from(metrics.track_y_start));
+    let thumb_offset = pointer_offset
+        .saturating_sub(grab_offset)
+        .clamp(0, max_thumb_offset);
+
+    Some(
+        ((thumb_offset * (state.window.total_rows - 1)) + (max_thumb_offset / 2))
+            / max_thumb_offset,
+    )
 }
 
 fn render_loading_indicator(buf: &mut Buffer, area: Rect, state: &GridState, theme: &Theme) {
@@ -975,7 +1075,11 @@ pub fn hit_test(area: Rect, state: &GridState, x: u16, y: u16) -> Option<GridHit
         .saturating_sub(gutter_width)
         .saturating_sub(1 + rail_width);
 
-    if x >= area.x + area.width.saturating_sub(1) {
+    if vertical_scrollbar_metrics(area, state).is_some_and(|metrics| {
+        x == metrics.track_x
+            && y >= metrics.track_y_start
+            && y < metrics.track_y_start + metrics.track_height as u16
+    }) {
         return Some(GridHit::Scrollbar);
     }
 
@@ -1040,9 +1144,13 @@ fn hit_test_col(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_visible_cols, enum_value_color, GridInit, GridState};
+    use super::{
+        compute_visible_cols, enum_value_color, scrollbar_drag_start, scrollbar_drag_target_row,
+        GridInit, GridState,
+    };
     use crate::db::{schema::Column, types::SqlValue};
     use crate::theme::Theme;
+    use ratatui::layout::Rect;
 
     fn make_col(name: &str, col_type: &str, is_pk: bool) -> Column {
         Column {
@@ -1115,6 +1223,64 @@ mod tests {
         let visible = compute_visible_cols(&grid, 20);
 
         assert_eq!(visible, vec![(0, 6), (1, 14)]);
+    }
+
+    #[test]
+    fn extra_width_prefers_text_columns_over_numeric_columns() {
+        let columns = vec![
+            make_col("id", "INTEGER", false),
+            make_col("title", "TEXT", false),
+            make_col("score", "INTEGER", false),
+        ];
+        let mut grid = GridState::new(GridInit {
+            table_name: "scores".to_string(),
+            columns,
+            fk_cols: vec![false, false, false],
+            enumerated_values: vec![Vec::new(), Vec::new(), Vec::new()],
+            rows: vec![vec![
+                SqlValue::Integer(1),
+                SqlValue::Text("Alice".to_string()),
+                SqlValue::Integer(42),
+            ]],
+            width_sample_rows: vec![],
+            total_rows: 1,
+            area_width: 28,
+        });
+        grid.col_widths = vec![6, 8, 6];
+
+        let visible = compute_visible_cols(&grid, 28);
+
+        assert_eq!(visible, vec![(0, 6), (1, 16), (2, 6)]);
+    }
+
+    #[test]
+    fn scrollbar_drag_maps_pointer_position_to_row() {
+        let columns = vec![make_col("name", "TEXT", false)];
+        let mut grid = GridState::new(GridInit {
+            table_name: "customers".to_string(),
+            columns,
+            fk_cols: vec![false],
+            enumerated_values: vec![Vec::new()],
+            rows: vec![vec![SqlValue::Text("Alice".to_string())]; 50],
+            width_sample_rows: vec![],
+            total_rows: 100,
+            area_width: 40,
+        });
+        grid.window.viewport_rows = 20;
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 13,
+        };
+
+        let (grab_offset, top_row) = scrollbar_drag_start(area, &grid, 3).expect("thumb drag");
+        let lower_row =
+            scrollbar_drag_target_row(area, &grid, 10, grab_offset).expect("lower drag target");
+
+        assert_eq!(top_row, 0);
+        assert!(lower_row > 0);
+        assert!(lower_row < grid.window.total_rows);
     }
 
     #[test]

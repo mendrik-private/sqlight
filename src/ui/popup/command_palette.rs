@@ -13,7 +13,6 @@ use crate::{config::Config, theme::Theme};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteCommand {
-    OpenDb,
     SwitchTable(String),
     ExportCsv,
     ExportJson,
@@ -31,7 +30,6 @@ pub enum PaletteCommand {
 impl PaletteCommand {
     pub fn label(&self) -> &'static str {
         match self {
-            PaletteCommand::OpenDb => "Open DB…",
             PaletteCommand::SwitchTable(_) => "Switch Table",
             PaletteCommand::ExportCsv => "Export CSV",
             PaletteCommand::ExportJson => "Export JSON",
@@ -57,7 +55,6 @@ pub struct CommandPaletteState {
 impl CommandPaletteState {
     pub fn new(table_names: Vec<String>) -> Self {
         let mut commands = vec![
-            PaletteCommand::OpenDb,
             PaletteCommand::ExportCsv,
             PaletteCommand::ExportJson,
             PaletteCommand::ExportSql,
@@ -228,5 +225,20 @@ pub fn render(
             };
             buf.set_string(x, row_y, ch.to_string(), style);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandPaletteState, PaletteCommand};
+
+    #[test]
+    fn command_palette_omits_open_db_command() {
+        let state = CommandPaletteState::new(vec!["users".to_string()]);
+
+        assert!(state.commands.iter().all(|cmd| cmd.label() != "Open DB…"));
+        assert!(state
+            .commands
+            .contains(&PaletteCommand::SwitchTable("users".to_string())));
     }
 }
