@@ -4,6 +4,7 @@ pub mod datetime_picker;
 pub mod filter;
 pub mod fk_picker;
 pub mod help;
+mod search_result_format;
 pub mod text_editor;
 pub mod value_picker;
 

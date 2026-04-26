@@ -9,6 +9,8 @@ use ratatui::{
 
 use crate::{config::Config, db::types::SqlValue, theme::Theme};
 
+use super::search_result_format::format_search_result_text;
+
 pub struct FkPickerState {
     pub target_table: String,
     #[allow(dead_code)]
@@ -105,7 +107,7 @@ impl FkPickerState {
 
     fn first_match(&self, row: &[SqlValue], needle_lower: &str) -> Option<(usize, (usize, usize))> {
         for (idx, value) in row.iter().enumerate().skip(1) {
-            let hay = value_to_string(value);
+            let hay = value_to_display_string(value);
             let hay_lower = hay.to_lowercase();
             if let Some(start) = hay_lower.find(needle_lower) {
                 return Some((idx, (start, start + needle_lower.len())));
@@ -289,7 +291,7 @@ fn render_preview(
         let label = format!(" {}: ", col_name);
         cursor = put(buf, cursor, y, x + width as u16, &label, label_style);
         let remaining = width.saturating_sub(label.chars().count());
-        let text = value_to_string(&row[col_idx]);
+        let text = value_to_display_string(&row[col_idx]);
         let snippet = centered_snippet(&text, start, end, remaining);
         cursor = put(buf, cursor, y, x + width as u16, &snippet.left, base);
         cursor = put(
@@ -306,7 +308,7 @@ fn render_preview(
             .iter()
             .skip(1)
             .take(3)
-            .map(value_to_string)
+            .map(value_to_display_string)
             .collect::<Vec<_>>()
             .join(" · ");
         let preview: String = summary.chars().take(width.saturating_sub(1)).collect();
@@ -332,12 +334,12 @@ fn put(buf: &mut Buffer, mut x: u16, y: u16, right: u16, text: &str, style: Styl
     x
 }
 
-fn value_to_string(value: &SqlValue) -> String {
+fn value_to_display_string(value: &SqlValue) -> String {
     match value {
         SqlValue::Null => "null".to_string(),
         SqlValue::Integer(n) => n.to_string(),
         SqlValue::Real(f) => f.to_string(),
-        SqlValue::Text(s) => s.clone(),
+        SqlValue::Text(s) => format_search_result_text(s),
         SqlValue::Blob(bytes) => format!("<blob {} bytes>", bytes.len()),
     }
 }

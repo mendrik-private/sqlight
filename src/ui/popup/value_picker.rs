@@ -12,6 +12,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{config::Config, db::types::SqlValue, theme::Theme};
 
+use super::search_result_format::format_search_result_text;
+
 #[allow(dead_code)]
 pub struct ValuePickerState {
     pub table: String,
@@ -22,6 +24,13 @@ pub struct ValuePickerState {
     pub filter: String,
     pub selected: usize,
     pub original: SqlValue,
+}
+
+struct FilteredValue<'a> {
+    raw: &'a str,
+    display: String,
+    score: i64,
+    matched: Vec<usize>,
 }
 
 impl ValuePickerState {
@@ -58,31 +67,37 @@ impl ValuePickerState {
         Some(SqlValue::Text(value.to_string()))
     }
 
-    pub fn filtered_values(&self) -> Vec<(usize, &str, Vec<usize>)> {
+    fn filtered_values(&self) -> Vec<FilteredValue<'_>> {
         if self.filter.is_empty() {
             return self
                 .values
                 .iter()
-                .enumerate()
-                .map(|(i, v)| (i, v.as_str(), vec![]))
+                .map(|value| FilteredValue {
+                    raw: value.as_str(),
+                    display: format_search_result_text(value),
+                    score: 0,
+                    matched: vec![],
+                })
                 .collect();
         }
         let matcher = SkimMatcherV2::default();
-        let mut results: Vec<(usize, &str, i64, Vec<usize>)> = self
+        let mut results: Vec<FilteredValue<'_>> = self
             .values
             .iter()
-            .enumerate()
-            .filter_map(|(i, v)| {
+            .filter_map(|value| {
+                let display = format_search_result_text(value);
                 matcher
-                    .fuzzy_indices(v, &self.filter)
-                    .map(|(score, indices)| (i, v.as_str(), score, indices))
+                    .fuzzy_indices(&display, &self.filter)
+                    .map(|(score, indices)| FilteredValue {
+                        raw: value.as_str(),
+                        display,
+                        score,
+                        matched: indices,
+                    })
             })
             .collect();
-        results.sort_by_key(|result| Reverse(result.2));
+        results.sort_by_key(|result| Reverse(result.score));
         results
-            .into_iter()
-            .map(|(i, v, _, idx)| (i, v, idx))
-            .collect()
     }
 
     pub fn move_up(&mut self) {
@@ -104,7 +119,7 @@ impl ValuePickerState {
         let offset = usize::from(self.custom_value_available());
         filtered
             .get(self.selected.saturating_sub(offset))
-            .map(|(_, v, _)| *v)
+            .map(|entry| entry.raw)
     }
 
     pub fn push_filter_char(&mut self, ch: char) {
@@ -137,7 +152,7 @@ impl ValuePickerState {
         entries.extend(
             self.filtered_values()
                 .into_iter()
-                .map(|(_, value, matched)| (value.to_string(), matched, false)),
+                .map(|entry| (entry.display, entry.matched, false)),
         );
         entries
     }
