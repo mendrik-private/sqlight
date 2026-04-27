@@ -2,7 +2,7 @@
 
 **sqv** is a keyboard-first terminal viewer for SQLite databases. It is built for fast table browsing, in-place editing, filtering, sorting, and foreign-key navigation without leaving the terminal.
 
-<img width="2875" height="1571" alt="image" src="https://github.com/user-attachments/assets/16dd8ac0-2071-470d-98dd-2533477bb794" />
+<img width="2880" height="1555" alt="image" src="https://github.com/user-attachments/assets/38ea5b40-a57e-4c49-b3bd-19033f8c7a48" />
 
 ## Highlights
 
