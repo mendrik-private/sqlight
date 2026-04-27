@@ -106,6 +106,14 @@ struct GridDataReadyPayload {
     total_rows: i64,
 }
 
+struct FocusedCellContext {
+    col: Column,
+    table_name: String,
+    rowid: i64,
+    cell_value: SqlValue,
+    is_fk: bool,
+}
+
 pub struct App {
     pub schema: Schema,
     pub sidebar: SidebarState,
@@ -178,6 +186,8 @@ pub enum Message {
     MoveFirstCell,
     MoveLastCell,
     OpenPopup,
+    OpenDirectEdit,
+    SetFocusedCellNull,
     ClosePopup,
     CommitEdit,
     EditCommitted {
@@ -587,227 +597,238 @@ impl App {
                     self.toast.push("Read-only database", ToastKind::Error);
                     return;
                 }
-                let popup_context = self.grid.as_ref().map(|grid| {
-                    let col_idx = grid.focused_col;
-                    let col = grid.columns.get(col_idx).cloned();
-                    let table_name = grid.table_name.clone();
-                    let abs_row = grid.focused_row as i64;
-                    let cell_value = grid
-                        .window
-                        .get_row(abs_row)
-                        .and_then(|r| r.get(col_idx))
-                        .cloned()
-                        .unwrap_or(SqlValue::Null);
-                    let is_fk = grid.fk_cols.get(col_idx).copied().unwrap_or(false);
-                    let sort = grid.sort.as_ref().and_then(|s| {
-                        grid.columns
-                            .get(s.col_idx)
-                            .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
-                    });
-                    (
-                        col,
-                        table_name,
-                        abs_row,
-                        cell_value,
-                        is_fk,
-                        sort,
-                        grid.filter.clone(),
-                    )
-                });
-                if let Some((col, table_name, abs_row, cell_value, is_fk, sort, filter)) =
-                    popup_context
+                if let Some(FocusedCellContext {
+                    col,
+                    table_name,
+                    rowid: actual_rowid,
+                    cell_value,
+                    is_fk,
+                }) = self.focused_cell_context()
                 {
-                    let Some(actual_rowid) =
-                        self.resolve_rowid_at_offset(&table_name, abs_row, sort, filter)
-                    else {
-                        self.dirty = true;
-                        return;
-                    };
+                    if is_fk {
+                        let table_meta = self.schema.tables.iter().find(|t| t.name == table_name);
+                        let fk_opt = table_meta.and_then(|tm| {
+                            tm.foreign_keys
+                                .iter()
+                                .find(|fk| fk.from_col == col.name)
+                                .cloned()
+                        });
+                        if let Some(fk) = fk_opt {
+                            let target_meta =
+                                self.schema.tables.iter().find(|t| t.name == fk.to_table);
+                            let display_cols = target_meta
+                                .map(|tm| {
+                                    tm.columns
+                                        .iter()
+                                        .filter(|c| c.name != fk.to_col)
+                                        .map(|c| c.name.clone())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
 
-                    if let Some(col) = col {
-                        if is_fk {
-                            let table_meta =
-                                self.schema.tables.iter().find(|t| t.name == table_name);
-                            let fk_opt = table_meta.and_then(|tm| {
-                                tm.foreign_keys
-                                    .iter()
-                                    .find(|fk| fk.from_col == col.name)
-                                    .cloned()
-                            });
-                            if let Some(fk) = fk_opt {
-                                let target_meta =
-                                    self.schema.tables.iter().find(|t| t.name == fk.to_table);
-                                let display_cols = target_meta
-                                    .map(|tm| {
-                                        tm.columns
-                                            .iter()
-                                            .filter(|c| c.name != fk.to_col)
-                                            .map(|c| c.name.clone())
+                            let picker_state = FkPickerState::new(
+                                fk.to_table.clone(),
+                                fk.to_col.clone(),
+                                display_cols.clone(),
+                                table_name.clone(),
+                                col.name.clone(),
+                                actual_rowid,
+                                cell_value.clone(),
+                            );
+                            self.popup = Some(PopupKind::FkPicker(picker_state));
+                            self.mode = AppMode::Edit;
+
+                            let pool = Arc::clone(&self.pool);
+                            let tx = self.tx.clone();
+                            let to_table = fk.to_table.clone();
+                            let to_col = fk.to_col.clone();
+                            let disp_cols = display_cols;
+                            tokio::task::spawn(async move {
+                                let to_table_c = to_table.clone();
+                                let result = tokio::task::spawn_blocking(
+                                    move || -> anyhow::Result<Vec<Vec<SqlValue>>> {
+                                        let conn = pool.get()?;
+                                        let col_list = std::iter::once(&to_col)
+                                            .chain(disp_cols.iter())
+                                            .map(|c| format!("\"{}\"", c))
                                             .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
-
-                                let picker_state = FkPickerState::new(
-                                    fk.to_table.clone(),
-                                    fk.to_col.clone(),
-                                    display_cols.clone(),
-                                    table_name.clone(),
-                                    col.name.clone(),
-                                    actual_rowid,
-                                    cell_value.clone(),
-                                );
-                                self.popup = Some(PopupKind::FkPicker(picker_state));
-                                self.mode = AppMode::Edit;
-
-                                let pool = Arc::clone(&self.pool);
-                                let tx = self.tx.clone();
-                                let to_table = fk.to_table.clone();
-                                let to_col = fk.to_col.clone();
-                                let disp_cols = display_cols;
-                                tokio::task::spawn(async move {
-                                    let to_table_c = to_table.clone();
-                                    let result = tokio::task::spawn_blocking(
-                                        move || -> anyhow::Result<Vec<Vec<SqlValue>>> {
-                                            let conn = pool.get()?;
-                                            let col_list = std::iter::once(&to_col)
-                                                .chain(disp_cols.iter())
-                                                .map(|c| format!("\"{}\"", c))
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-                                            let sql = format!(
-                                                "SELECT {} FROM \"{}\" LIMIT 200",
-                                                col_list, to_table_c
-                                            );
-                                            let mut stmt = conn.prepare(&sql)?;
-                                            let col_count = 1 + disp_cols.len();
-                                            let rows = stmt
-                                                .query_map([], |row| {
-                                                    let mut vals = Vec::new();
-                                                    for i in 0..col_count {
-                                                        let v = match row.get_ref(i)? {
-                                                            rusqlite::types::ValueRef::Null => {
-                                                                SqlValue::Null
-                                                            }
-                                                            rusqlite::types::ValueRef::Integer(
-                                                                n,
-                                                            ) => SqlValue::Integer(n),
-                                                            rusqlite::types::ValueRef::Real(f) => {
-                                                                SqlValue::Real(f)
-                                                            }
-                                                            rusqlite::types::ValueRef::Text(b) => {
-                                                                SqlValue::Text(
-                                                                    String::from_utf8_lossy(b)
-                                                                        .into_owned(),
-                                                                )
-                                                            }
-                                                            rusqlite::types::ValueRef::Blob(b) => {
-                                                                SqlValue::Blob(b.to_vec())
-                                                            }
-                                                        };
-                                                        vals.push(v);
-                                                    }
-                                                    Ok(vals)
-                                                })?
-                                                .collect::<Result<Vec<_>, _>>()?;
-                                            Ok(rows)
-                                        },
-                                    )
-                                    .await;
-                                    if let Ok(Ok(rows)) = result {
-                                        let _ = tx.send(Message::FkRowsReady {
-                                            target_table: to_table,
-                                            rows,
-                                        });
-                                    }
-                                });
-
-                                self.dirty = true;
-                                return;
-                            }
-                        }
-
-                        let upper = col.col_type.to_uppercase();
-                        let original = cell_value;
-                        let looks_like_epoch_datetime =
-                            (upper.contains("INT") || upper.contains("NUM")) && {
-                                let name = col.name.to_lowercase();
-                                name.ends_with("_at")
-                                    || name.contains("timestamp")
-                                    || name.contains("created_at")
-                                    || name.contains("updated_at")
-                            };
-                        if upper.contains("TIMESTAMP")
-                            || upper.contains("DATETIME")
-                            || (upper.contains("DATE") && upper.contains("TIME"))
-                            || looks_like_epoch_datetime
-                            || DatetimePickerState::supports_value(&original)
-                        {
-                            self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
-                                table_name,
-                                actual_rowid,
-                                col.name,
-                                original,
-                            )));
-                        } else if upper.contains("DATE")
-                            || DatePickerState::supports_value(&original)
-                        {
-                            self.popup = Some(PopupKind::DatePicker(DatePickerState::new(
-                                table_name,
-                                actual_rowid,
-                                col.name,
-                                original,
-                            )));
-                        } else {
-                            let distinct_values = match self.pool.get() {
-                                Ok(conn) => match db::load_distinct_values(
-                                    &conn,
-                                    &table_name,
-                                    &col.name,
-                                    VALUE_PICKER_DISTINCT_LIMIT + 1,
-                                ) {
-                                    Ok(values) => Some(values),
-                                    Err(err) => {
-                                        self.toast.push(
-                                            format!("Distinct lookup failed: {}", err),
-                                            ToastKind::Error,
+                                            .join(", ");
+                                        let sql = format!(
+                                            "SELECT {} FROM \"{}\" LIMIT 200",
+                                            col_list, to_table_c
                                         );
-                                        None
-                                    }
-                                },
+                                        let mut stmt = conn.prepare(&sql)?;
+                                        let col_count = 1 + disp_cols.len();
+                                        let rows = stmt
+                                            .query_map([], |row| {
+                                                let mut vals = Vec::new();
+                                                for i in 0..col_count {
+                                                    let v = match row.get_ref(i)? {
+                                                        rusqlite::types::ValueRef::Null => {
+                                                            SqlValue::Null
+                                                        }
+                                                        rusqlite::types::ValueRef::Integer(n) => {
+                                                            SqlValue::Integer(n)
+                                                        }
+                                                        rusqlite::types::ValueRef::Real(f) => {
+                                                            SqlValue::Real(f)
+                                                        }
+                                                        rusqlite::types::ValueRef::Text(b) => {
+                                                            SqlValue::Text(
+                                                                String::from_utf8_lossy(b)
+                                                                    .into_owned(),
+                                                            )
+                                                        }
+                                                        rusqlite::types::ValueRef::Blob(b) => {
+                                                            SqlValue::Blob(b.to_vec())
+                                                        }
+                                                    };
+                                                    vals.push(v);
+                                                }
+                                                Ok(vals)
+                                            })?
+                                            .collect::<Result<Vec<_>, _>>()?;
+                                        Ok(rows)
+                                    },
+                                )
+                                .await;
+                                if let Ok(Ok(rows)) = result {
+                                    let _ = tx.send(Message::FkRowsReady {
+                                        target_table: to_table,
+                                        rows,
+                                    });
+                                }
+                            });
+
+                            self.dirty = true;
+                            return;
+                        }
+                    }
+
+                    let upper = col.col_type.to_uppercase();
+                    let original = cell_value;
+                    let looks_like_epoch_datetime =
+                        (upper.contains("INT") || upper.contains("NUM")) && {
+                            let name = col.name.to_lowercase();
+                            name.ends_with("_at")
+                                || name.contains("timestamp")
+                                || name.contains("created_at")
+                                || name.contains("updated_at")
+                        };
+                    if upper.contains("TIMESTAMP")
+                        || upper.contains("DATETIME")
+                        || (upper.contains("DATE") && upper.contains("TIME"))
+                        || looks_like_epoch_datetime
+                        || DatetimePickerState::supports_value(&original)
+                    {
+                        self.popup = Some(PopupKind::DatetimePicker(DatetimePickerState::new(
+                            table_name,
+                            actual_rowid,
+                            col.name,
+                            original,
+                        )));
+                    } else if upper.contains("DATE") || DatePickerState::supports_value(&original) {
+                        self.popup = Some(PopupKind::DatePicker(DatePickerState::new(
+                            table_name,
+                            actual_rowid,
+                            col.name,
+                            original,
+                        )));
+                    } else {
+                        let distinct_values = match self.pool.get() {
+                            Ok(conn) => match db::load_distinct_values(
+                                &conn,
+                                &table_name,
+                                &col.name,
+                                VALUE_PICKER_DISTINCT_LIMIT + 1,
+                            ) {
+                                Ok(values) => Some(values),
                                 Err(err) => {
                                     self.toast.push(
-                                        format!("DB connection failed: {}", err),
+                                        format!("Distinct lookup failed: {}", err),
                                         ToastKind::Error,
                                     );
                                     None
                                 }
-                            };
+                            },
+                            Err(err) => {
+                                self.toast.push(
+                                    format!("DB connection failed: {}", err),
+                                    ToastKind::Error,
+                                );
+                                None
+                            }
+                        };
 
-                            if let Some(values) =
-                                distinct_values.filter(|values| should_use_value_picker(values))
-                            {
-                                self.popup = Some(PopupKind::ValuePicker(
-                                    crate::ui::popup::ValuePickerState::new(
-                                        table_name,
-                                        actual_rowid,
-                                        col.name.clone(),
-                                        col.col_type.clone(),
-                                        values,
-                                        original,
-                                    ),
-                                ));
-                            } else {
-                                self.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+                        if let Some(values) =
+                            distinct_values.filter(|values| should_use_value_picker(values))
+                        {
+                            self.popup = Some(PopupKind::ValuePicker(
+                                crate::ui::popup::ValuePickerState::new(
                                     table_name,
                                     actual_rowid,
                                     col.name.clone(),
                                     col.col_type.clone(),
+                                    values,
                                     original,
-                                    self.readonly,
-                                )));
-                            }
+                                ),
+                            ));
+                        } else {
+                            self.open_text_editor(
+                                table_name,
+                                actual_rowid,
+                                col.name,
+                                col.col_type,
+                                original,
+                            );
                         }
-                        self.mode = AppMode::Edit;
+                    }
+                    self.mode = AppMode::Edit;
+                }
+                self.dirty = true;
+            }
+            Message::OpenDirectEdit => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    return;
+                }
+                if let Some(FocusedCellContext {
+                    table_name,
+                    rowid,
+                    cell_value,
+                    col,
+                    ..
+                }) = self.focused_cell_context()
+                {
+                    self.open_text_editor(table_name, rowid, col.name, col.col_type, cell_value);
+                }
+                self.dirty = true;
+            }
+            Message::SetFocusedCellNull => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    return;
+                }
+                if let Some(FocusedCellContext {
+                    col,
+                    table_name,
+                    rowid,
+                    cell_value,
+                    ..
+                }) = self.focused_cell_context()
+                {
+                    if col.not_null {
+                        self.toast.push("Column is NOT NULL", ToastKind::Error);
+                    } else if cell_value == SqlValue::Null {
+                        self.toast.push("Cell is already NULL", ToastKind::Error);
+                    } else {
+                        self.submit_cell_edit(
+                            table_name,
+                            col.name,
+                            rowid,
+                            SqlValue::Null,
+                            cell_value,
+                        );
                     }
                 }
                 self.dirty = true;
@@ -870,38 +891,7 @@ impl App {
                     PopupKind::Help(_) => None,
                 });
                 if let Some((table, col, rowid, value, original)) = write_info {
-                    let pool = Arc::clone(&self.pool);
-                    let tx = self.tx.clone();
-                    let table_c = table.clone();
-                    let col_c = col.clone();
-                    tokio::task::spawn(async move {
-                        let tx_err = tx.clone();
-                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                            let conn = pool.get()?;
-                            crate::db::write::commit_cell_edit(
-                                &conn, &table_c, &col_c, rowid, &value,
-                            )?;
-                            let _ = tx.send(Message::EditCommitted {
-                                rowid,
-                                table: table_c,
-                                col: col_c,
-                                original,
-                            });
-                            Ok(())
-                        })
-                        .await;
-
-                        match result {
-                            Ok(Ok(())) => {}
-                            Ok(Err(err)) => {
-                                let _ = tx_err.send(Message::EditFailed(err.to_string()));
-                            }
-                            Err(err) => {
-                                let _ = tx_err.send(Message::EditFailed(err.to_string()));
-                            }
-                        }
-                    });
-                    self.dirty = true;
+                    self.submit_cell_edit(table, col, rowid, value, original);
                 } else {
                     self.toast
                         .push("No value selected to save", ToastKind::Error);
@@ -2679,6 +2669,12 @@ impl App {
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 let _ = self.tx.send(Message::OpenPopup);
             }
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                let _ = self.tx.send(Message::OpenDirectEdit);
+            }
+            (KeyCode::Char('n'), KeyModifiers::NONE) if self.focused_cell_can_be_set_null() => {
+                let _ = self.tx.send(Message::SetFocusedCellNull);
+            }
             (KeyCode::Esc, _) => {
                 self.focus = FocusPane::Sidebar;
                 self.dirty = true;
@@ -2703,7 +2699,7 @@ impl App {
             }
             (KeyCode::Char(c), KeyModifiers::NONE)
                 if c.is_alphabetic()
-                    && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's' | 'f' | 'i' | 'd') =>
+                    && !matches!(c, 'j' | 'k' | 'h' | 'l' | 's' | 'f' | 'i' | 'd' | 'e' | 'n') =>
             {
                 let is_text_sort = self.grid.as_ref().is_some_and(|g| {
                     if let Some(sort) = &g.sort {
@@ -2748,6 +2744,115 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn focused_cell_context(&mut self) -> Option<FocusedCellContext> {
+        let grid = self.grid.as_ref()?;
+        let col_idx = grid.focused_col;
+        let col = grid.columns.get(col_idx)?.clone();
+        let table_name = grid.table_name.clone();
+        let abs_row = grid.focused_row as i64;
+        let cell_value = grid
+            .window
+            .get_row(abs_row)
+            .and_then(|row| row.get(col_idx))
+            .cloned()
+            .unwrap_or(SqlValue::Null);
+        let is_fk = grid.fk_cols.get(col_idx).copied().unwrap_or(false);
+        let sort = grid.sort.as_ref().and_then(|s| {
+            grid.columns
+                .get(s.col_idx)
+                .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+        });
+        let filter = grid.filter.clone();
+        let rowid = self.resolve_rowid_at_offset(&table_name, abs_row, sort, filter)?;
+
+        Some(FocusedCellContext {
+            col,
+            table_name,
+            rowid,
+            cell_value,
+            is_fk,
+        })
+    }
+
+    pub(crate) fn focused_cell_can_be_set_null(&self) -> bool {
+        if self.readonly {
+            return false;
+        }
+        let Some(grid) = self.grid.as_ref() else {
+            return false;
+        };
+        let col_idx = grid.focused_col;
+        let Some(col) = grid.columns.get(col_idx) else {
+            return false;
+        };
+        if col.not_null {
+            return false;
+        }
+        grid.window
+            .get_row(grid.focused_row as i64)
+            .and_then(|row| row.get(col_idx))
+            .is_some_and(|value| *value != SqlValue::Null)
+    }
+
+    fn open_text_editor(
+        &mut self,
+        table: String,
+        rowid: i64,
+        col_name: String,
+        col_type: String,
+        original: SqlValue,
+    ) {
+        self.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+            table,
+            rowid,
+            col_name,
+            col_type,
+            original,
+            self.readonly,
+        )));
+        self.mode = AppMode::Edit;
+    }
+
+    fn submit_cell_edit(
+        &mut self,
+        table: String,
+        col: String,
+        rowid: i64,
+        value: SqlValue,
+        original: SqlValue,
+    ) {
+        let pool = Arc::clone(&self.pool);
+        let tx = self.tx.clone();
+        let table_c = table.clone();
+        let col_c = col.clone();
+        tokio::task::spawn(async move {
+            let tx_err = tx.clone();
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let conn = pool.get()?;
+                crate::db::write::commit_cell_edit(&conn, &table_c, &col_c, rowid, &value)?;
+                let _ = tx.send(Message::EditCommitted {
+                    rowid,
+                    table: table_c,
+                    col: col_c,
+                    original,
+                });
+                Ok(())
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    let _ = tx_err.send(Message::EditFailed(err.to_string()));
+                }
+                Err(err) => {
+                    let _ = tx_err.send(Message::EditFailed(err.to_string()));
+                }
+            }
+        });
+        self.dirty = true;
     }
 
     fn open_table(&mut self, name: String) {
@@ -3292,6 +3397,15 @@ mod tests {
         app.grid.as_ref().map_or(20, |g| g.window.viewport_rows)
     }
 
+    fn seed_user_row(app: &App) {
+        let conn = app.pool.get().expect("test conn");
+        conn.execute(
+            "INSERT INTO users (id, name, age, email) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![1i64, "Alice", 30i64, "alice@example.com"],
+        )
+        .expect("seed user row");
+    }
+
     #[test]
     fn normalize_enumerated_values_skips_unique_columns() {
         let values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -3811,6 +3925,69 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert_eq!(try_recv_variant(&mut rx), "OpenPopup");
+    }
+
+    #[test]
+    fn e_in_grid_sends_open_direct_edit() {
+        let (mut app, mut rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.focus = FocusPane::Grid;
+        let _ = rx.try_recv(); // drain
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(try_recv_variant(&mut rx), "OpenDirectEdit");
+    }
+
+    #[test]
+    fn n_in_grid_sends_set_focused_cell_null_when_allowed() {
+        let (mut app, _rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.focused_col = 1;
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.tx = tx;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(try_recv_variant(&mut rx), "SetFocusedCellNull");
+    }
+
+    #[test]
+    fn n_in_grid_does_nothing_when_cell_cannot_be_null() {
+        let (mut app, _rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.focused_col = 1;
+        grid.columns[1].not_null = true;
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.tx = tx;
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(try_recv_variant(&mut rx), "no message");
+    }
+
+    #[test]
+    fn open_direct_edit_opens_text_editor() {
+        let (mut app, _rx) = make_test_app();
+        let mut grid = make_grid();
+        grid.focused_col = 1;
+        app.grid = Some(grid);
+        seed_user_row(&app);
+
+        app.update(Message::OpenDirectEdit);
+
+        assert!(matches!(app.popup, Some(PopupKind::TextEditor(_))));
     }
 
     // ---------- sidebar shortcuts ----------

@@ -33,14 +33,14 @@ impl HelpState {
 
 const HELP_TEXT: &str = r#"
 Navigation                     Editing
-  ↑↓←→ / h j k l  Move cell     Enter            Edit cell / open picker
+  ↑↓←→ / h j k l  Move cell     Enter            Open picker / smart editor
   Home / End       Col start/end Esc              Close popup / focus sidebar
   Ctrl-Home/End    Table bounds  Ctrl-Enter       Commit cell edit
   PgUp / PgDn      Scroll page   i                Insert row
   Ctrl-↑ / Ctrl-↓  Scroll page   d                Delete row (confirm)
-  Mouse wheel      Scroll rows   Ctrl-Z           Undo last write
-  Shift-wheel      Scroll cols
-  Click cell       Focus cell
+  Mouse wheel      Scroll rows   e                Edit value directly
+  Shift-wheel      Scroll cols   n                Set NULL
+  Click cell       Focus cell    Ctrl-Z           Undo last write
 
 Filtering & Sorting            Tabs & Sidebar
   s                Cycle sort    Ctrl-B           Toggle sidebar

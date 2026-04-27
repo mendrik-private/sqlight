@@ -231,7 +231,11 @@ fn action_hint_text(app: &App) -> Option<String> {
         }
         FocusPane::Grid => {
             if app.grid.is_some() && !app.readonly {
-                hints.push("[enter] edit".to_string());
+                hints.push("[enter] open".to_string());
+                hints.push("[e] modify".to_string());
+                if app.focused_cell_can_be_set_null() {
+                    hints.push("[n] set null".to_string());
+                }
                 hints.push("[i] add row".to_string());
                 hints.push("[d] delete row".to_string());
             }
@@ -353,8 +357,24 @@ mod tests {
 
         let hints = action_hint_text(&app).expect("grid hints");
 
+        assert!(hints.contains("[e] modify"));
+        assert!(hints.contains("[n] set null"));
         assert!(hints.contains("[i] add row"));
         assert!(hints.contains("[d] delete row"));
+    }
+
+    #[test]
+    fn grid_hints_hide_set_null_when_focused_cell_is_null() {
+        let mut app = make_test_app();
+        let mut grid = make_grid();
+        grid.window.rows[0][1] = SqlValue::Null;
+        grid.focused_col = 1;
+        app.grid = Some(grid);
+        app.focus = FocusPane::Grid;
+
+        let hints = action_hint_text(&app).expect("grid hints");
+
+        assert!(!hints.contains("[n] set null"));
     }
 }
 

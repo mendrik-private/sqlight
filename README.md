@@ -79,7 +79,9 @@ sqv check-terminal
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Edit focused cell / confirm picker |
+| `Enter` | Open the focused cell picker/editor |
+| `e` | Open the focused cell in the direct editor |
+| `n` | Set the focused cell to `NULL` when allowed |
 | `Esc` | Close popup |
 | `Ctrl-Enter` | Save the current cell edit |
 | `i` | Insert row |
