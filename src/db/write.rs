@@ -39,9 +39,40 @@ pub fn commit_cell_edit(
     }
 }
 
-pub fn insert_default_row(conn: &Connection, table: &str) -> anyhow::Result<i64> {
+pub fn insert_row(
+    conn: &Connection,
+    table: &str,
+    values: &[(String, SqlValue)],
+) -> anyhow::Result<i64> {
     let tx = conn.unchecked_transaction()?;
-    let result = tx.execute(&format!("INSERT INTO \"{}\" DEFAULT VALUES", table), []);
+    let result = if values.is_empty() {
+        tx.execute(&format!("INSERT INTO \"{}\" DEFAULT VALUES", table), [])
+    } else {
+        let col_names = values
+            .iter()
+            .map(|(name, _)| format!("\"{}\"", name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders = (1..=values.len())
+            .map(|idx| format!("?{}", idx))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO \"{}\" ({}) VALUES ({})",
+            table, col_names, placeholders
+        );
+        let params: Vec<rusqlite::types::Value> = values
+            .iter()
+            .map(|(_, value)| match value {
+                SqlValue::Null => rusqlite::types::Value::Null,
+                SqlValue::Integer(n) => rusqlite::types::Value::Integer(*n),
+                SqlValue::Real(f) => rusqlite::types::Value::Real(*f),
+                SqlValue::Text(s) => rusqlite::types::Value::Text(s.clone()),
+                SqlValue::Blob(bytes) => rusqlite::types::Value::Blob(bytes.clone()),
+            })
+            .collect();
+        tx.execute(&sql, rusqlite::params_from_iter(params.iter()))
+    };
     match result {
         Ok(_) => {
             let rowid = tx.last_insert_rowid();
@@ -152,5 +183,43 @@ pub fn reinsert_row(
             let _ = tx.rollback();
             Err(anyhow::anyhow!("{}", e))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insert_row;
+    use crate::db::types::SqlValue;
+    use rusqlite::Connection;
+
+    #[test]
+    fn insert_row_applies_defaults_when_only_required_values_are_provided() {
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(
+            "CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                age INTEGER DEFAULT 18
+            );",
+        )
+        .expect("create table");
+
+        let rowid = insert_row(
+            &conn,
+            "users",
+            &[("name".to_string(), SqlValue::Text("Alice".to_string()))],
+        )
+        .expect("insert row");
+
+        let (name, age): (String, i64) = conn
+            .query_row(
+                "SELECT name, age FROM users WHERE rowid = ?1",
+                rusqlite::params![rowid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load inserted row");
+
+        assert_eq!(name, "Alice");
+        assert_eq!(age, 18);
     }
 }

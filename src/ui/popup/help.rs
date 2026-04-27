@@ -35,12 +35,13 @@ const HELP_TEXT: &str = r#"
 Navigation                     Editing
   ↑↓←→ / h j k l  Move cell     Enter            Open picker / smart editor
   Home / End       Col start/end Esc              Close popup / focus sidebar
-  Ctrl-Home/End    Table bounds  Ctrl-Enter       Commit cell edit
-  PgUp / PgDn      Scroll page   i                Insert row
+  Ctrl-Home/End    Table bounds  Alt-Enter        New line in text editor
+  PgUp / PgDn      Scroll page   Ctrl-Enter       Save staged row
   Ctrl-↑ / Ctrl-↓  Scroll page   d                Delete row (confirm)
-  Mouse wheel      Scroll rows   e                Edit value directly
-  Shift-wheel      Scroll cols   n                Set NULL
-  Click cell       Focus cell    Ctrl-Z           Undo last write
+  Mouse wheel      Scroll rows   i                Insert row (staged)
+  Shift-wheel      Scroll cols   e                Edit value directly
+  Click cell       Focus cell    n                Set NULL
+                                 Ctrl-Z           Undo last write
 
 Filtering & Sorting            Tabs & Sidebar
   s                Cycle sort    Ctrl-B           Toggle sidebar

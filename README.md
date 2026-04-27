@@ -83,11 +83,12 @@ sqv check-terminal
 | Key | Action |
 |-----|--------|
 | `Enter` | Open the focused cell picker/editor |
+| `Alt-Enter` | Insert a newline in the direct text editor |
 | `e` | Open the focused cell in the direct editor |
 | `n` | Set the focused cell to `NULL` when allowed |
 | `Esc` | Close popup |
-| `Ctrl-Enter` | Save the current cell edit |
-| `i` | Insert row |
+| `Ctrl-Enter` | Save an inserted row from the staged row editor |
+| `i` | Insert row in a staged editor, then validate on save |
 | `d` | Delete row |
 | `Ctrl-z` | Undo last write |
 

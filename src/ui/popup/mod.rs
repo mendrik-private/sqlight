@@ -4,6 +4,7 @@ pub mod datetime_picker;
 pub mod filter;
 pub mod fk_picker;
 pub mod help;
+pub mod insert_row;
 mod search_result_format;
 pub mod text_editor;
 pub mod value_picker;
@@ -23,6 +24,7 @@ pub use datetime_picker::{DatetimeFocus, DatetimePickerState};
 pub use filter::FilterPopupState;
 pub use fk_picker::FkPickerState;
 pub use help::HelpState;
+pub use insert_row::InsertRowState;
 pub use text_editor::TextEditorState;
 pub use value_picker::ValuePickerState;
 
@@ -32,6 +34,7 @@ pub enum PopupKind {
     ValuePicker(ValuePickerState),
     DatePicker(DatePickerState),
     DatetimePicker(DatetimePickerState),
+    InsertRow(InsertRowState),
     FkPicker(FkPickerState),
     FilterPopup(FilterPopupState),
     CommandPalette(CommandPaletteState),
@@ -70,6 +73,7 @@ pub fn render_popup(
         PopupKind::ValuePicker(state) => value_picker::render(frame, area, state, theme, config),
         PopupKind::DatePicker(state) => date_picker::render(frame, area, state, theme),
         PopupKind::DatetimePicker(state) => datetime_picker::render(frame, area, state, theme),
+        PopupKind::InsertRow(state) => insert_row::render(frame, area, state, theme, config),
         PopupKind::FkPicker(state) => fk_picker::render(frame, area, state, theme, config),
         PopupKind::FilterPopup(state) => filter::render(frame, area, state, theme, config),
         PopupKind::CommandPalette(state) => {

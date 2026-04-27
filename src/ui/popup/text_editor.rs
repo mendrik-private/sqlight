@@ -6,7 +6,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::{config::Config, db::types::SqlValue, theme::Theme};
+use crate::{
+    config::Config,
+    db::types::{affinity, ColAffinity, SqlValue},
+    theme::Theme,
+};
 
 #[allow(dead_code)]
 pub struct TextEditorState {
@@ -40,7 +44,6 @@ impl TextEditorState {
             SqlValue::Text(s) => s.clone(),
             SqlValue::Blob(_) => String::new(),
         };
-        let upper = col_type.to_uppercase();
         let mut json_mode = false;
         if let SqlValue::Text(text) = &original {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
@@ -50,7 +53,7 @@ impl TextEditorState {
                 }
             }
         }
-        let is_multiline = json_mode || upper.contains("TEXT") || upper.contains("CLOB");
+        let is_multiline = json_mode || matches!(affinity(&col_type), ColAffinity::Text);
         let cursor_pos = current.chars().count();
         let mut state = Self {
             table,
@@ -331,30 +334,36 @@ pub fn render(
     );
 
     if state.is_multiline {
-        let editor_chunks =
-            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(sections[1]);
+        let editor_chunks = Layout::horizontal([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(sections[1]);
         let content_lines: Vec<Line<'static>> = state
             .display_lines()
             .into_iter()
             .map(|line| Line::from(Span::styled(line, input_style)))
             .collect();
-        let viewport_lines = editor_chunks[0].height.max(1) as usize;
+        let viewport_lines = editor_chunks[1].height.max(1) as usize;
         let scroll_y = state.effective_scroll_y(viewport_lines);
         frame.render_widget(
             Paragraph::new(content_lines)
                 .style(Style::default().bg(theme.bg_raised))
                 .scroll((scroll_y, 0)),
-            editor_chunks[0],
+            editor_chunks[1],
         );
         render_scrollbar(
             frame,
-            editor_chunks[1],
+            editor_chunks[2],
             scroll_y as usize,
             state.line_count(),
             viewport_lines,
             theme,
         );
     } else {
+        let editor_chunks =
+            Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).split(sections[1]);
         let display_lines = state.display_lines();
         let line = display_lines
             .into_iter()
@@ -363,16 +372,16 @@ pub fn render(
         frame.render_widget(
             Paragraph::new(vec![Line::from(Span::styled(line, input_style))])
                 .style(Style::default().bg(theme.bg_raised)),
-            sections[1],
+            editor_chunks[1],
         );
     }
 
     frame.render_widget(
         Paragraph::new(vec![Line::from(Span::styled(
             if state.is_multiline {
-                " Enter newline · Ctrl-Enter save · arrows move · PgUp/PgDn scroll · Esc cancel"
+                " Enter save · Alt-Enter newline · Esc cancel"
             } else {
-                " Enter save · Ctrl-Enter save · Esc cancel"
+                " Enter save · Esc cancel"
             },
             hint_style,
         ))])
@@ -424,5 +433,25 @@ fn render_scrollbar(
             "█",
             Style::default().fg(theme.fg_mute).bg(theme.bg_raised),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextEditorState;
+    use crate::db::types::SqlValue;
+
+    #[test]
+    fn varchar_columns_are_multiline_text_editors() {
+        let state = TextEditorState::new(
+            "users".to_string(),
+            1,
+            "note".to_string(),
+            "VARCHAR(255)".to_string(),
+            SqlValue::Text("hello".to_string()),
+            false,
+        );
+
+        assert!(state.is_multiline);
     }
 }

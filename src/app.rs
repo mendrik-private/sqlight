@@ -19,7 +19,8 @@ use crate::{
     ui::{
         popup::{
             CommandPaletteState, DateFocus, DatePickerState, DatetimeFocus, DatetimePickerState,
-            FilterPopupState, FkPickerState, HelpState, PaletteCommand, PopupKind, TextEditorState,
+            FilterPopupState, FkPickerState, HelpState, InsertRowState, PaletteCommand, PopupKind,
+            TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
         tabbar::TabMouseAction,
@@ -188,6 +189,7 @@ pub enum Message {
     OpenPopup,
     OpenDirectEdit,
     SetFocusedCellNull,
+    CommitInsertRow,
     ClosePopup,
     CommitEdit,
     EditCommitted {
@@ -886,6 +888,7 @@ impl App {
                             s.original.clone(),
                         )
                     }),
+                    PopupKind::InsertRow(_) => None,
                     PopupKind::FilterPopup(_) => None,
                     PopupKind::CommandPalette(_) => None,
                     PopupKind::Help(_) => None,
@@ -1301,32 +1304,59 @@ impl App {
                     self.toast.push("Read-only database", ToastKind::Error);
                     return;
                 }
-                let table = self.grid.as_ref().map(|g| g.table_name.clone());
-                if let Some(table) = table {
+                if let Some(ref grid) = self.grid {
+                    self.popup = Some(PopupKind::InsertRow(InsertRowState::new(
+                        grid.table_name.clone(),
+                        grid.columns.clone(),
+                    )));
+                    self.mode = AppMode::Edit;
+                }
+                self.dirty = true;
+            }
+            Message::CommitInsertRow => {
+                if self.readonly {
+                    self.toast.push("Read-only database", ToastKind::Error);
+                    return;
+                }
+                let insert_spec = self.popup.as_ref().and_then(|popup| match popup {
+                    PopupKind::InsertRow(state) => match state.build_insert_values() {
+                        Ok(values) => Some((state.table.clone(), values)),
+                        Err(err) => {
+                            self.toast.push(err.to_string(), ToastKind::Error);
+                            None
+                        }
+                    },
+                    _ => None,
+                });
+                if let Some((table, values)) = insert_spec {
                     let pool = Arc::clone(&self.pool);
                     let tx = self.tx.clone();
                     let table_c = table.clone();
                     tokio::task::spawn(async move {
-                        let result = tokio::task::spawn_blocking(move || {
+                        let tx_err = tx.clone();
+                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
                             let conn = pool.get()?;
-                            let rowid = crate::db::write::insert_default_row(&conn, &table_c)?;
-                            Ok::<i64, anyhow::Error>(rowid)
+                            crate::db::write::insert_row(&conn, &table_c, &values)
                         })
                         .await;
                         match result {
                             Ok(Ok(rowid)) => {
                                 let _ = tx.send(Message::RowInserted { table, rowid });
                             }
-                            Ok(Err(e)) => {
-                                let _ = tx.send(Message::EditFailed(e.to_string()));
+                            Ok(Err(err)) => {
+                                let _ = tx_err.send(Message::EditFailed(err.to_string()));
                             }
-                            Err(_) => {}
+                            Err(err) => {
+                                let _ = tx_err.send(Message::EditFailed(err.to_string()));
+                            }
                         }
                     });
                 }
                 self.dirty = true;
             }
             Message::RowInserted { table, rowid } => {
+                self.popup = None;
+                self.mode = AppMode::Browse;
                 if let Some(ref mut grid) = self.grid {
                     if grid.table_name == table {
                         self.undo_stack.push(UndoFrame {
@@ -2176,12 +2206,15 @@ impl App {
         use crossterm::event::{KeyCode, KeyModifiers};
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
             match self.popup {
-                Some(PopupKind::TextEditor(_))
-                | Some(PopupKind::ValuePicker(_))
+                Some(PopupKind::ValuePicker(_))
                 | Some(PopupKind::DatePicker(_))
                 | Some(PopupKind::DatetimePicker(_))
+                | Some(PopupKind::InsertRow(_))
                 | Some(PopupKind::FkPicker(_)) => {
-                    let _ = self.tx.send(Message::CommitEdit);
+                    let _ = self.tx.send(match self.popup {
+                        Some(PopupKind::InsertRow(_)) => Message::CommitInsertRow,
+                        _ => Message::CommitEdit,
+                    });
                     return;
                 }
                 _ => {}
@@ -2195,13 +2228,16 @@ impl App {
                 KeyCode::Esc => {
                     let _ = self.tx.send(Message::ClosePopup);
                 }
-                KeyCode::Enter => {
-                    if state.is_multiline && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                    if state.is_multiline {
                         state.insert_char('\n');
                         self.dirty = true;
-                    } else {
-                        let _ = self.tx.send(Message::CommitEdit);
                     }
+                }
+                KeyCode::Enter
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    let _ = self.tx.send(Message::CommitEdit);
                 }
                 KeyCode::Tab if state.is_multiline => {
                     state.insert_char(' ');
@@ -2391,6 +2427,52 @@ impl App {
                 }
                 KeyCode::Delete => {
                     state.clear();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::InsertRow(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    if state.editing {
+                        state.stop_editing();
+                    } else {
+                        state.start_editing();
+                    }
+                    self.dirty = true;
+                }
+                KeyCode::Up if !state.editing => {
+                    state.move_up();
+                    self.dirty = true;
+                }
+                KeyCode::Down if !state.editing => {
+                    state.move_down();
+                    self.dirty = true;
+                }
+                KeyCode::Left if state.editing => {
+                    state.move_cursor_left();
+                    self.dirty = true;
+                }
+                KeyCode::Right if state.editing => {
+                    state.move_cursor_right();
+                    self.dirty = true;
+                }
+                KeyCode::Backspace if state.editing => {
+                    state.delete_backward();
+                    self.dirty = true;
+                }
+                KeyCode::Delete => {
+                    state.reset_selected();
+                    self.dirty = true;
+                }
+                KeyCode::Char(c)
+                    if state.editing
+                        && (key.modifiers == KeyModifiers::NONE
+                            || key.modifiers == KeyModifiers::SHIFT) =>
+                {
+                    state.insert_char(c);
                     self.dirty = true;
                 }
                 _ => {}
@@ -3406,6 +3488,49 @@ mod tests {
         .expect("seed user row");
     }
 
+    fn make_constrained_insert_app() -> (App, mpsc::UnboundedReceiver<Message>) {
+        let manager = SqliteConnectionManager::memory();
+        let pool = Arc::new(
+            r2d2::Pool::builder()
+                .max_size(1)
+                .build(manager)
+                .expect("test pool"),
+        );
+        let conn = pool.get().expect("test conn");
+        conn.execute_batch(
+            "CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                age INTEGER DEFAULT 18
+            );",
+        )
+        .expect("seed schema");
+        let schema = db::load_schema(&conn).expect("load schema");
+        let columns = schema.tables[0].columns.clone();
+        drop(conn);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            schema,
+            Config::default(),
+            pool,
+            tx,
+            false,
+            ":memory:".to_string(),
+        );
+        app.grid = Some(crate::grid::GridState::new(crate::grid::GridInit {
+            table_name: "users".to_string(),
+            columns,
+            fk_cols: vec![false; 3],
+            enumerated_values: vec![Vec::new(); 3],
+            rows: Vec::new(),
+            width_sample_rows: vec![Vec::new(); 3],
+            total_rows: 0,
+            area_width: 80,
+        }));
+        (app, rx)
+    }
+
     #[test]
     fn normalize_enumerated_values_skips_unique_columns() {
         let values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -3559,6 +3684,73 @@ mod tests {
             KeyModifiers::CONTROL,
         )));
         // no CommitEdit sent for Help popup
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ctrl_enter_in_text_editor_is_noop() {
+        let (mut app, mut rx) = make_test_app();
+        app.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+            "users".to_string(),
+            1,
+            "name".to_string(),
+            "TEXT".to_string(),
+            SqlValue::Text("Alice".to_string()),
+            false,
+        )));
+        app.mode = AppMode::Edit;
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn enter_in_text_editor_sends_commit_edit() {
+        let (mut app, mut rx) = make_test_app();
+        app.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+            "users".to_string(),
+            1,
+            "name".to_string(),
+            "TEXT".to_string(),
+            SqlValue::Text("Alice".to_string()),
+            false,
+        )));
+        app.mode = AppMode::Edit;
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(try_recv_variant(&mut rx), "CommitEdit");
+    }
+
+    #[test]
+    fn alt_enter_in_text_editor_inserts_newline() {
+        let (mut app, mut rx) = make_test_app();
+        app.popup = Some(PopupKind::TextEditor(TextEditorState::new(
+            "users".to_string(),
+            1,
+            "name".to_string(),
+            "TEXT".to_string(),
+            SqlValue::Text("Alice".to_string()),
+            false,
+        )));
+        app.mode = AppMode::Edit;
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+        )));
+
+        match app.popup {
+            Some(PopupKind::TextEditor(ref state)) => assert_eq!(state.current, "Alice\n"),
+            _ => panic!("expected text editor popup"),
+        }
         assert!(rx.try_recv().is_err());
     }
 
@@ -3886,6 +4078,16 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert_eq!(try_recv_variant(&mut rx), "InsertRow");
+    }
+
+    #[test]
+    fn insert_row_opens_insert_popup_for_constrained_table() {
+        let (mut app, _rx) = make_constrained_insert_app();
+        app.focus = FocusPane::Grid;
+
+        app.update(Message::InsertRow);
+
+        assert!(matches!(app.popup, Some(PopupKind::InsertRow(_))));
     }
 
     #[test]
