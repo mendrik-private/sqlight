@@ -139,6 +139,9 @@ GitHub Actions provides:
     - build a Debian package
     - publish GitHub Release assets
     - publish an apt repository to GitHub Pages
+3. **Manual releases** from the Actions tab:
+    - use the selected branch's `Cargo.toml` version as the release tag
+    - create or update the matching GitHub Release for that commit
 
 To cut a release:
 
