@@ -2228,11 +2228,11 @@ impl App {
                 KeyCode::Esc => {
                     let _ = self.tx.send(Message::ClosePopup);
                 }
-                KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                    if state.is_multiline {
-                        state.insert_char('\n');
-                        self.dirty = true;
-                    }
+                KeyCode::Enter
+                    if key.modifiers.contains(KeyModifiers::ALT) && state.is_multiline =>
+                {
+                    state.insert_char('\n');
+                    self.dirty = true;
                 }
                 KeyCode::Enter
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
