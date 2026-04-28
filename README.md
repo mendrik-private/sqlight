@@ -146,8 +146,8 @@ GitHub Actions provides:
 To cut a release:
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 Before the first tagged release, enable **GitHub Pages** for the repository so the apt repository can be deployed from GitHub Actions. Tagged releases now wait for a successful Pages deployment before publishing release assets.
