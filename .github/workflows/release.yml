@@ -79,6 +79,19 @@ jobs:
           path: dist
 
       - name: Publish GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          overwrite_files: true
+          tag_name: ${{ needs.build-release.outputs.release_tag }}
+          files: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/SHA256SUMS
+
+      - name: Publish GitHub release (manual)
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
