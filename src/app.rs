@@ -1669,7 +1669,7 @@ impl App {
                     }
                     .to_string();
                     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                    let export_path = format!("{}/sqv_export.{}", home, format);
+                    let export_path = format!("{}/sqview_export.{}", home, format);
                     let export_path_clone = export_path.clone();
                     tokio::task::spawn(async move {
                         let format_c = format.clone();

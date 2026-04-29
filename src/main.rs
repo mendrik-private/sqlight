@@ -1,4 +1,5 @@
 mod app;
+mod app_dirs;
 mod config;
 mod db;
 mod event;
@@ -18,7 +19,7 @@ use app::{App, Message};
 use config::Config;
 
 #[derive(Parser, Debug)]
-#[command(name = "sqv", about = "Terminal SQLite viewer")]
+#[command(name = "sqview", about = "Terminal SQLite viewer")]
 struct Args {
     /// Path to SQLite database file, or :memory:
     path: Option<String>,
@@ -74,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let path = match args.path.as_deref() {
         Some(p) => p.to_string(),
         None => {
-            eprintln!("Error: path argument required (or use `sqv check-terminal`)");
+            eprintln!("Error: path argument required (or use `sqview check-terminal`)");
             std::process::exit(1);
         }
     };

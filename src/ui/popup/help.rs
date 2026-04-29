@@ -51,9 +51,9 @@ Filtering & Sorting            Tabs & Sidebar
   Backspace        Jump back     Enter (sidebar)  Open table
 
 Navigation (sidebar)           Command Palette  (Ctrl-P / Ctrl-Shift-P)
-  ↑ / ↓            Move up/down  Export CSV       Save to ~/sqv_export.csv
-  Enter            Open table    Export JSON      Save to ~/sqv_export.json
-                                 Export SQL       Save to ~/sqv_export.sql
+  ↑ / ↓            Move up/down  Export CSV       Save to ~/sqview_export.csv
+  Enter            Open table    Export JSON      Save to ~/sqview_export.json
+                                 Export SQL       Save to ~/sqview_export.sql
 Misc                            Copy cell        Clip to OSC52 clipboard
   Ctrl-Q           Quit         Copy row JSON    Clip to OSC52 clipboard
   ?                Help (this)  Toggle sidebar   Show/hide schema panel

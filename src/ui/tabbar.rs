@@ -34,7 +34,7 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         buf.set_string(
             x,
             label_y,
-            " sqv ",
+            " sqview ",
             Style::default()
                 .fg(theme.accent)
                 .bg(theme.bg_soft)

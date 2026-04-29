@@ -230,7 +230,7 @@ mod tests {
 
     fn temp_export_path(ext: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "sqv-export-test-{}-{}.{}",
+            "sqview-export-test-{}-{}.{}",
             process::id(),
             NEXT_TEST_FILE_ID.fetch_add(1, Ordering::Relaxed),
             ext

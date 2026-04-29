@@ -1,4 +1,3 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -26,5 +25,5 @@ impl Config {
 }
 
 fn config_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "sqv").map(|dirs| dirs.config_dir().join("config.toml"))
+    crate::app_dirs::config_dir().map(|dir| dir.join("config.toml"))
 }

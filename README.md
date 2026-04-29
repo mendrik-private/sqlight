@@ -1,6 +1,6 @@
-# sqv
+# sqview
 
-**sqv** is a keyboard-first terminal viewer for SQLite databases. It is built for fast table browsing, in-place editing, filtering, sorting, and foreign-key navigation without leaving the terminal.
+**sqview** is a keyboard-first terminal viewer for SQLite databases. It is built for fast table browsing, in-place editing, filtering, sorting, and foreign-key navigation without leaving the terminal.
 
 <img width="2880" height="1555" alt="image" src="https://github.com/user-attachments/assets/38ea5b40-a57e-4c49-b3bd-19033f8c7a48" />
 <br/>
@@ -17,34 +17,33 @@
 
 ## Install
 
-### apt (GitHub Pages repository)
+### Debian/Ubuntu package
 
-The project publishes an `amd64` Debian package to a GitHub-hosted apt repository.
+Download the latest Debian package from GitHub Releases and install it directly:
 
 ```bash
-echo "deb [trusted=yes arch=amd64] https://mendrik-private.github.io/sqv stable main" \
-  | sudo tee /etc/apt/sources.list.d/sqv.list
-sudo apt update
-sudo apt install sqv
+curl -fsSL -o sqview-linux-amd64.deb \
+  https://github.com/mendrik-private/sqv/releases/latest/download/sqview-linux-amd64.deb
+sudo apt install ./sqview-linux-amd64.deb
 ```
 
-`trusted=yes` is required because the repository is published from GitHub Pages without apt signing.
+This installs the `sqview` package and the `sqview` command, avoiding the `sqv` name collision with Ubuntu's OpenPGP tool.
 
 ### Release binary
 
 Download the latest Linux binary archive from GitHub Releases and install it into `/usr/local/bin`:
 
 ```bash
-curl -fsSL -o sqv-linux-x86_64.tar.gz \
-  https://github.com/mendrik-private/sqv/releases/latest/download/sqv-linux-x86_64.tar.gz
-tar -xzf sqv-linux-x86_64.tar.gz
-sudo install -m 0755 sqv /usr/local/bin/sqv
+curl -fsSL -o sqview-linux-x86_64.tar.gz \
+  https://github.com/mendrik-private/sqv/releases/latest/download/sqview-linux-x86_64.tar.gz
+tar -xzf sqview-linux-x86_64.tar.gz
+sudo install -m 0755 sqview /usr/local/bin/sqview
 ```
 
 ### From source
 
 ```bash
-cargo install --path .
+cargo install --path . --bin sqview
 ```
 
 Or run directly from the checkout:
@@ -56,8 +55,8 @@ cargo run --release -- path/to/database.db
 ## Usage
 
 ```text
-sqv <DB_PATH> [--readonly]
-sqv check-terminal
+sqview <DB_PATH> [--readonly]
+sqview check-terminal
 ```
 
 - `DB_PATH`: path to a SQLite database, or `:memory:`
@@ -110,8 +109,10 @@ sqv check-terminal
 Configuration is read from:
 
 ```text
-$XDG_CONFIG_HOME/sqv/config.toml
+$XDG_CONFIG_HOME/sqview/config.toml
 ```
+
+Existing `sqv` config and filter state directories are still used automatically when present, so current users do not need to migrate anything immediately.
 
 Example:
 
@@ -138,7 +139,6 @@ GitHub Actions provides:
     - build the release binary
     - build a Debian package
     - publish GitHub Release assets
-    - publish an apt repository to GitHub Pages
 3. **Manual releases** from the Actions tab:
     - use the selected branch's `Cargo.toml` version as the release tag
     - create or update the matching GitHub Release for that commit
@@ -149,5 +149,3 @@ To cut a release:
 git tag v0.1.3
 git push origin v0.1.3
 ```
-
-Before the first tagged release, enable **GitHub Pages** for the repository so the apt repository can be deployed from GitHub Actions. Tagged releases now wait for a successful Pages deployment before publishing release assets.

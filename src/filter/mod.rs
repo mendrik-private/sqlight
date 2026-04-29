@@ -10,8 +10,9 @@ pub fn filter_path(db_path: &str, table_name: &str) -> Option<PathBuf> {
         .file_stem()?
         .to_str()?
         .to_string();
-    let dirs = directories::ProjectDirs::from("", "", "sqv")?;
-    let state_dir = dirs.data_local_dir().join("filters").join(&db_basename);
+    let state_dir = crate::app_dirs::data_local_dir()?
+        .join("filters")
+        .join(&db_basename);
     Some(state_dir.join(format!("{}.toml", table_name)))
 }
 
