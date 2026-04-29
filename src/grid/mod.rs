@@ -674,7 +674,7 @@ fn render_header(
             buf.set_string(
                 chevron_x,
                 header_y,
-                "▸",
+                "⏵",
                 Style::default().fg(theme.fg_mute).bg(theme.bg_raised),
             );
         }

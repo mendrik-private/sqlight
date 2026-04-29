@@ -121,7 +121,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_right_frame_label(
             frame,
             body_area,
-            &format!(" TABLE - {} ", grid.table_name),
+            &format!(" {} ", grid.table_name),
             &app.theme,
         );
         crate::grid::render_grid(frame, inner, grid, &app.theme, &app.config);
@@ -138,7 +138,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_right_frame_label(
             frame,
             body_area,
-            &format!(" TABLE - {} ", tab.table_name),
+            &format!(" {} ", tab.table_name),
             &app.theme,
         );
         let msg = format!(" Loading {}...", tab.table_name);
@@ -156,7 +156,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         app.grid_outer_area = Some(body_area);
         app.grid_inner_area = Some(inner);
         frame.render_widget(block, body_area);
-        render_right_frame_label(frame, body_area, " TABLE ", &app.theme);
     }
 
     if tabbar_area.height > 0 {

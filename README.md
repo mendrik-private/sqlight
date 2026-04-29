@@ -148,6 +148,6 @@ GitHub Actions provides:
 To cut a release:
 
 ```bash
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
