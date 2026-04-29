@@ -23,8 +23,9 @@ Download the latest Debian package from GitHub Releases and install it directly:
 
 ```bash
 tmp_deb="$(mktemp /tmp/sqview-linux-amd64.XXXXXX.deb)"
-curl -fsSL -o "$tmp_deb" \
+curl -fL --retry 5 --retry-all-errors --retry-delay 2 -o "$tmp_deb" \
   https://github.com/mendrik-private/sqv/releases/latest/download/sqview-linux-amd64.deb
+chmod 0644 "$tmp_deb"
 sudo apt install "$tmp_deb"
 rm -f "$tmp_deb"
 ```
@@ -36,7 +37,7 @@ This installs the `sqview` package and the `sqview` command, avoiding the `sqv` 
 Download the latest Linux binary archive from GitHub Releases and install it into `/usr/local/bin`:
 
 ```bash
-curl -fsSL -o sqview-linux-x86_64.tar.gz \
+curl -fL --retry 5 --retry-all-errors --retry-delay 2 -o sqview-linux-x86_64.tar.gz \
   https://github.com/mendrik-private/sqv/releases/latest/download/sqview-linux-x86_64.tar.gz
 tar -xzf sqview-linux-x86_64.tar.gz
 sudo install -m 0755 sqview /usr/local/bin/sqview
