@@ -22,9 +22,11 @@
 Download the latest Debian package from GitHub Releases and install it directly:
 
 ```bash
-curl -fsSL -o sqview-linux-amd64.deb \
+tmp_deb="$(mktemp /tmp/sqview-linux-amd64.XXXXXX.deb)"
+curl -fsSL -o "$tmp_deb" \
   https://github.com/mendrik-private/sqv/releases/latest/download/sqview-linux-amd64.deb
-sudo apt install ./sqview-linux-amd64.deb
+sudo apt install "$tmp_deb"
+rm -f "$tmp_deb"
 ```
 
 This installs the `sqview` package and the `sqview` command, avoiding the `sqv` name collision with Ubuntu's OpenPGP tool.
