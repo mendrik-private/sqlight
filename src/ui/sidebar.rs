@@ -251,7 +251,7 @@ pub fn render_sidebar(
         .style(Style::default().bg(theme.bg_soft))
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
-            " SCHEMA",
+            "SCHEMA",
             Style::default()
                 .fg(if focused { theme.accent } else { theme.fg_mute })
                 .add_modifier(Modifier::BOLD),
