@@ -47,12 +47,13 @@ Filtering & Sorting            Tabs & Sidebar
   s                Cycle sort    Ctrl-B           Toggle sidebar
   f                Filter col    Tab              Switch focus
   Shift-F          Clear filters BackTab          Switch focus
-  j (on FK)        Jump to FK    Click tab        Switch / close tab
-  Backspace        Jump back     Enter (sidebar)  Open table
+  j (on FK)        Jump to FK    1-9 / 0          Activate tab 1–10
+  Backspace        Jump back     Click tab        Switch / close tab
+                                 Enter (sidebar)  Open table
 
 Navigation (sidebar)           Command Palette  (Ctrl-P / Ctrl-Shift-P)
-  ↑ / ↓            Move up/down  Export CSV       Save to ~/sqview_export.csv
-  ← / →            Close/open    Export JSON      Save to ~/sqview_export.json
+  ↑↓ / k j          Move up/down  Export CSV       Save to ~/sqview_export.csv
+  ←→ / h l          Close/open    Export JSON      Save to ~/sqview_export.json
   Enter            Open table    Export SQL       Save to ~/sqview_export.sql
 Misc                            Copy cell        Clip to OSC52 clipboard
   Ctrl-Q           Quit         Copy row JSON    Clip to OSC52 clipboard

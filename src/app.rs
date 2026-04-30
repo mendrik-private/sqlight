@@ -144,6 +144,9 @@ pub struct App {
     grid_scrollbar_drag: Option<GridScrollbarDrag>,
     pool: Arc<DbPool>,
     tx: UnboundedSender<Message>,
+    pub last_own_write_at: Option<std::time::Instant>,
+    pub file_check_in_flight: bool,
+    pub pending_external_refresh: bool,
 }
 
 #[allow(dead_code)]
@@ -248,6 +251,8 @@ pub enum Message {
     ReloadSchema,
     SchemaReady(Schema),
     CopyCell,
+    FileChanged,
+    ExternalRefresh(Schema),
 }
 
 impl App {
@@ -288,6 +293,9 @@ impl App {
             grid_scrollbar_drag: None,
             pool,
             tx,
+            last_own_write_at: None,
+            file_check_in_flight: false,
+            pending_external_refresh: false,
         }
     }
 
@@ -838,6 +846,14 @@ impl App {
             Message::ClosePopup => {
                 self.popup = None;
                 self.mode = AppMode::Browse;
+                if self.pending_external_refresh {
+                    self.pending_external_refresh = false;
+                    if let Some(ref mut grid) = self.grid {
+                        if !grid.window.fetch_in_flight {
+                            grid.needs_fetch = true;
+                        }
+                    }
+                }
                 self.dirty = true;
             }
             Message::CommitEdit => {
@@ -942,6 +958,7 @@ impl App {
                 if self.undo_stack.len() > 100 {
                     self.undo_stack.remove(0);
                 }
+                self.last_own_write_at = Some(std::time::Instant::now());
                 if let Some((table, cols, sort, off, lim)) = maybe_fetch {
                     self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
@@ -1357,6 +1374,7 @@ impl App {
             Message::RowInserted { table, rowid } => {
                 self.popup = None;
                 self.mode = AppMode::Browse;
+                self.last_own_write_at = Some(std::time::Instant::now());
                 if let Some(ref mut grid) = self.grid {
                     if grid.table_name == table {
                         self.undo_stack.push(UndoFrame {
@@ -1444,6 +1462,7 @@ impl App {
                 self.dirty = true;
             }
             Message::RowDeleted { table, rowid } => {
+                self.last_own_write_at = Some(std::time::Instant::now());
                 self.undo_stack.push(UndoFrame {
                     op: UndoOp::Delete,
                     table: table.clone(),
@@ -1641,6 +1660,82 @@ impl App {
                     let _ = std::io::stdout().write_all(osc52.as_bytes());
                     let _ = std::io::stdout().flush();
                     self.toast.push("Copied to clipboard", ToastKind::Success);
+                }
+                self.dirty = true;
+            }
+            Message::FileChanged => {
+                // Ignore events caused by our own writes (500 ms debounce window).
+                if self
+                    .last_own_write_at
+                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500))
+                {
+                    return;
+                }
+                // Deduplicate rapid bursts (e.g. WAL flush + main file write).
+                if self.file_check_in_flight {
+                    return;
+                }
+                self.file_check_in_flight = true;
+
+                // Spawn schema probe.
+                let pool = Arc::clone(&self.pool);
+                let tx = self.tx.clone();
+                tokio::task::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let conn = pool.get()?;
+                        crate::db::load_schema(&conn)
+                    })
+                    .await;
+                    if let Ok(Ok(schema)) = result {
+                        let _ = tx.send(Message::ExternalRefresh(schema));
+                    }
+                });
+
+                // Schedule data refresh, but not while a popup is open.
+                if self.mode == AppMode::Edit {
+                    self.pending_external_refresh = true;
+                } else if let Some(ref mut grid) = self.grid {
+                    if !grid.window.fetch_in_flight {
+                        grid.needs_fetch = true;
+                    }
+                }
+                self.dirty = true;
+            }
+            Message::ExternalRefresh(new_schema) => {
+                self.file_check_in_flight = false;
+
+                // Build sorted fingerprints: (name, "table"/"view"/"index").
+                let mut old_fp: Vec<(String, &str)> = self
+                    .schema
+                    .tables
+                    .iter()
+                    .map(|t| (t.name.clone(), "table"))
+                    .chain(self.schema.views.iter().map(|v| (v.name.clone(), "view")))
+                    .chain(
+                        self.schema
+                            .indexes
+                            .iter()
+                            .map(|i| (i.name.clone(), "index")),
+                    )
+                    .collect();
+                old_fp.sort_unstable();
+
+                let mut new_fp: Vec<(String, &str)> = new_schema
+                    .tables
+                    .iter()
+                    .map(|t| (t.name.clone(), "table"))
+                    .chain(new_schema.views.iter().map(|v| (v.name.clone(), "view")))
+                    .chain(new_schema.indexes.iter().map(|i| (i.name.clone(), "index")))
+                    .collect();
+                new_fp.sort_unstable();
+
+                if old_fp != new_fp {
+                    self.schema = new_schema;
+                    let total = self.sidebar.visible_count(&self.schema);
+                    if self.sidebar.selected >= total {
+                        self.sidebar.selected = total.saturating_sub(1);
+                    }
+                    self.toast.push("Schema changed", ToastKind::Info);
                 }
                 self.dirty = true;
             }
@@ -2174,6 +2269,15 @@ impl App {
             }
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
                 self.sidebar_visible = !self.sidebar_visible;
+            }
+            (KeyCode::Char(c @ '1'..='9'), KeyModifiers::NONE) if !self.open_tabs.is_empty() => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.open_tabs.len() {
+                    let _ = self.tx.send(Message::ActivateTab(idx));
+                }
+            }
+            (KeyCode::Char('0'), KeyModifiers::NONE) if self.open_tabs.len() >= 10 => {
+                let _ = self.tx.send(Message::ActivateTab(9));
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 self.focus = if self.sidebar_visible {
@@ -2817,12 +2921,12 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Up => self.sidebar.move_up(&self.schema),
-            KeyCode::Down => self.sidebar.move_down(&self.schema),
-            KeyCode::Left => {
+            KeyCode::Up | KeyCode::Char('k') => self.sidebar.move_up(&self.schema),
+            KeyCode::Down | KeyCode::Char('j') => self.sidebar.move_down(&self.schema),
+            KeyCode::Left | KeyCode::Char('h') => {
                 self.sidebar.collapse_selected_section(&self.schema);
             }
-            KeyCode::Right => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.sidebar.expand_selected_section(&self.schema);
             }
             KeyCode::Enter => {
@@ -4515,5 +4619,90 @@ mod tests {
 
         let values = (0..101).map(|i| format!("value-{i}")).collect::<Vec<_>>();
         assert!(!should_use_value_picker(&values));
+    }
+
+    // ---------- file-watch tests ----------
+
+    fn make_schema_with(table: &str) -> crate::db::schema::Schema {
+        let manager = SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("pool");
+        let conn = pool.get().expect("conn");
+        conn.execute_batch(&format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY);"))
+            .expect("create");
+        crate::db::load_schema(&conn).expect("schema")
+    }
+
+    #[test]
+    fn external_refresh_with_identical_schema_does_not_push_toast() {
+        let (mut app, _rx) = make_test_app();
+        // First: send a schema with a DIFFERENT table name → should push a toast.
+        let different_schema = make_schema_with("other_table");
+        let toast_before = app.toast.toasts.len();
+        app.update(Message::ExternalRefresh(different_schema));
+        assert_eq!(
+            app.toast.toasts.len(),
+            toast_before + 1,
+            "schema change should push a toast"
+        );
+        // Second: send the same schema again (fingerprint unchanged) → no new toast.
+        let same_again = make_schema_with("other_table");
+        let toast_mid = app.toast.toasts.len();
+        app.update(Message::ExternalRefresh(same_again));
+        assert_eq!(
+            app.toast.toasts.len(),
+            toast_mid,
+            "identical schema must not push another toast"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_changed_during_edit_mode_sets_pending_flag_not_needs_fetch() {
+        let (mut app, _rx) = make_test_app();
+        // Simulate an open grid.
+        app.grid = Some(make_grid());
+        // Put app into Edit mode (simulates an open popup).
+        app.mode = AppMode::Edit;
+        app.update(Message::FileChanged);
+        assert!(
+            app.pending_external_refresh,
+            "flag should be set in Edit mode"
+        );
+        if let Some(ref grid) = app.grid {
+            assert!(
+                !grid.needs_fetch,
+                "needs_fetch must not be set while editing"
+            );
+        }
+    }
+
+    #[test]
+    fn file_changed_within_own_write_debounce_is_ignored() {
+        let (mut app, _rx) = make_test_app();
+        // Mark a very recent own write.
+        app.last_own_write_at = Some(std::time::Instant::now());
+        app.update(Message::FileChanged);
+        // file_check_in_flight should NOT be set (handler returned early).
+        assert!(
+            !app.file_check_in_flight,
+            "in-flight must not be set when debounced"
+        );
+    }
+
+    #[test]
+    fn close_popup_clears_pending_refresh_and_triggers_fetch() {
+        let (mut app, _rx) = make_test_app();
+        app.grid = Some(make_grid());
+        app.mode = AppMode::Edit;
+        app.pending_external_refresh = true;
+        app.popup = Some(PopupKind::Help(HelpState::new()));
+        app.update(Message::ClosePopup);
+        assert!(!app.pending_external_refresh, "flag must be cleared");
+        assert_eq!(app.mode, AppMode::Browse);
+        if let Some(ref grid) = app.grid {
+            assert!(grid.needs_fetch, "needs_fetch must be set after close");
+        }
     }
 }

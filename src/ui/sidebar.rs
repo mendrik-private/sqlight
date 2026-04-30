@@ -37,7 +37,7 @@ impl Default for SidebarState {
 }
 
 impl SidebarState {
-    fn visible_count(&self, schema: &Schema) -> usize {
+    pub fn visible_count(&self, schema: &Schema) -> usize {
         let mut count = 3; // three section headers always visible
         if self.tables_expanded {
             count += schema.tables.len();

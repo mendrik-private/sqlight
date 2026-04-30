@@ -111,6 +111,26 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
+    // Set up OS-level file watcher (skip for :memory:).
+    let _watcher = if path != ":memory:" {
+        use notify::{EventKind, RecursiveMode, Watcher};
+        let tx_watch = tx.clone();
+        let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                if matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
+                    let _ = tx_watch.send(Message::FileChanged);
+                }
+            }
+        })?;
+        w.watch(std::path::Path::new(path), RecursiveMode::NonRecursive)?;
+        Some(w)
+    } else {
+        None
+    };
+
     let _guard = TerminalGuard::new()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;

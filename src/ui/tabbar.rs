@@ -12,6 +12,25 @@ pub enum TabMouseAction {
     Close(usize),
 }
 
+/// Returns the superscript digit for tabs 0–9, or `None` for higher indices.
+/// The sequence is ¹ ² ³ ⁴ ⁵ ⁶ ⁷ ⁸ ⁹ ⁰ so pressing 1–9 activates tab 0–8
+/// and pressing 0 activates tab 9.
+pub fn superscript_for_tab(idx: usize) -> Option<&'static str> {
+    match idx {
+        0 => Some("¹"),
+        1 => Some("²"),
+        2 => Some("³"),
+        3 => Some("⁴"),
+        4 => Some("⁵"),
+        5 => Some("⁶"),
+        6 => Some("⁷"),
+        7 => Some("⁸"),
+        8 => Some("⁹"),
+        9 => Some("⁰"),
+        _ => None,
+    }
+}
+
 pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -70,7 +89,17 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             base.fg(theme.fg_mute)
         };
-        let content_width = 1 + tab.table_name.chars().count() as u16 + 1 + 1 + 1;
+        let num_style = Style::default().fg(theme.fg_mute).bg(if is_active {
+            theme.bg_raised
+        } else {
+            theme.bg_soft
+        });
+
+        let sup = superscript_for_tab(idx);
+        let sup_w: u16 = if sup.is_some() { 1 } else { 0 };
+        let name_w = tab.table_name.chars().count() as u16;
+        // │ space name [sup] space × space │
+        let content_width = 1 + name_w + sup_w + 1 + 1 + 1;
         let tab_width = content_width + 2;
         let tab_x = x;
 
@@ -94,6 +123,9 @@ pub fn render_tabbar(frame: &mut Frame, area: Rect, app: &App) {
         label_x = put(buf, label_x, label_y, right, "│", border_style);
         label_x = put(buf, label_x, label_y, right, " ", base);
         label_x = put(buf, label_x, label_y, right, &tab.table_name, base);
+        if let Some(s) = sup {
+            label_x = put(buf, label_x, label_y, right, s, num_style);
+        }
         label_x = put(buf, label_x, label_y, right, " ", base);
         label_x = put(buf, label_x, label_y, right, "×", close_style);
         label_x = put(buf, label_x, label_y, right, " ", base);
@@ -149,10 +181,16 @@ pub fn hit_test(
             break;
         }
         let name_w = tab.table_name.chars().count() as u16;
-        let tab_width = name_w + 6;
+        let sup_w: u16 = if superscript_for_tab(idx).is_some() {
+            1
+        } else {
+            0
+        };
+        let tab_width = name_w + sup_w + 6;
         let tab_end = cursor.saturating_add(tab_width).min(right);
         if x >= cursor && x < tab_end {
-            let close_x = cursor + 1 + 1 + name_w + 1;
+            // │(1) space(1) name(name_w) [sup(sup_w)] → × is at cursor+2+name_w+sup_w
+            let close_x = cursor + 2 + name_w + sup_w;
             if middle_click || x == close_x {
                 return Some(TabMouseAction::Close(idx));
             }

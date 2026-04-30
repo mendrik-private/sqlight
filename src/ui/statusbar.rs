@@ -225,7 +225,7 @@ fn action_hint_text(app: &App) -> Option<String> {
     match app.focus {
         FocusPane::Sidebar => {
             hints.push("[enter] open".to_string());
-            hints.push("[←/→] fold".to_string());
+            hints.push("[←/→ h/l] fold".to_string());
             if app.sidebar_visible {
                 hints.push("[tab] panel".to_string());
             }
