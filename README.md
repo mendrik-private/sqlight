@@ -54,16 +54,26 @@ Or run directly from the checkout:
 cargo run --release -- path/to/database.db
 ```
 
+Use the built-in help to inspect the current CLI surface:
+
+```bash
+sqview --help
+sqview --version
+```
+
 ## Usage
 
 ```text
-sqview <DB_PATH> [--readonly]
+sqview [OPTIONS] <DB_PATH>
 sqview check-terminal
+sqview paths
 ```
 
 - `DB_PATH`: path to a SQLite database, or `:memory:`
 - `--readonly`: disable writes
+- `--no-watch`: disable automatic external refresh when the database file changes
 - `check-terminal`: print detected terminal capabilities
+- `paths`: print the config, data, and filter-state paths used by sqview
 
 ## Keybindings
 

@@ -17,6 +17,10 @@ pub fn config_dir() -> Option<PathBuf> {
     }
 }
 
+pub fn config_file() -> Option<PathBuf> {
+    Some(config_dir()?.join("config.toml"))
+}
+
 pub fn data_local_dir() -> Option<PathBuf> {
     let current = ProjectDirs::from("", "", APP_NAME)?;
     let legacy = ProjectDirs::from("", "", LEGACY_APP_NAME)?;
@@ -28,4 +32,8 @@ pub fn data_local_dir() -> Option<PathBuf> {
     } else {
         Some(current.data_local_dir().to_path_buf())
     }
+}
+
+pub fn filter_dir() -> Option<PathBuf> {
+    Some(data_local_dir()?.join("filters"))
 }

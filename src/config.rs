@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -14,7 +13,7 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
-        if let Some(path) = config_path() {
+        if let Some(path) = crate::app_dirs::config_file() {
             if path.exists() {
                 let content = std::fs::read_to_string(path)?;
                 return Ok(toml::from_str(&content)?);
@@ -22,8 +21,4 @@ impl Config {
         }
         Ok(Self::default())
     }
-}
-
-fn config_path() -> Option<PathBuf> {
-    crate::app_dirs::config_dir().map(|dir| dir.join("config.toml"))
 }

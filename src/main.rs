@@ -18,22 +18,74 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use app::{App, Message};
 use config::Config;
 
+const CLI_AFTER_HELP: &str = "\
+Examples:
+  sqview path/to/database.db
+  sqview :memory:
+  sqview path/to/database.db --readonly --no-watch
+  sqview check-terminal
+  sqview paths";
+
 #[derive(Parser, Debug)]
-#[command(name = "sqview", about = "Terminal SQLite viewer")]
-struct Args {
+#[command(
+    name = "sqview",
+    about = "Keyboard-first terminal SQLite viewer",
+    version,
+    arg_required_else_help = true,
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true,
+    after_help = CLI_AFTER_HELP
+)]
+struct Cli {
     /// Path to SQLite database file, or :memory:
+    #[arg(value_name = "DB_PATH", value_parser = parse_database_path)]
     path: Option<String>,
     /// Open database in read-only mode
-    #[arg(long)]
+    #[arg(long, requires = "path")]
     readonly: bool,
+    /// Disable automatic external refresh when the database file changes
+    #[arg(long, requires = "path")]
+    no_watch: bool,
     #[command(subcommand)]
-    subcommand: Option<SubCmd>,
+    command: Option<CliCommand>,
 }
 
-#[derive(clap::Subcommand, Debug)]
-enum SubCmd {
+#[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+enum CliCommand {
     /// Check terminal capabilities
     CheckTerminal,
+    /// Print the config and data paths sqview uses
+    Paths,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RunMode {
+    Open(OpenOptions),
+    CheckTerminal,
+    Paths,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OpenOptions {
+    path: String,
+    readonly: bool,
+    watch: bool,
+}
+
+impl Cli {
+    fn into_run_mode(self) -> RunMode {
+        match self.command {
+            Some(CliCommand::CheckTerminal) => RunMode::CheckTerminal,
+            Some(CliCommand::Paths) => RunMode::Paths,
+            None => RunMode::Open(OpenOptions {
+                path: self
+                    .path
+                    .expect("clap should require a database path when no subcommand is present"),
+                readonly: self.readonly,
+                watch: !self.no_watch,
+            }),
+        }
+    }
 }
 
 struct TerminalGuard;
@@ -65,26 +117,21 @@ impl Drop for TerminalGuard {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
-    if let Some(SubCmd::CheckTerminal) = &args.subcommand {
-        check_terminal();
-        return Ok(());
-    }
-
-    let path = match args.path.as_deref() {
-        Some(p) => p.to_string(),
-        None => {
-            eprintln!("Error: path argument required (or use `sqview check-terminal`)");
-            std::process::exit(1);
+    match Cli::parse().into_run_mode() {
+        RunMode::Open(options) => open_database(options).await,
+        RunMode::CheckTerminal => {
+            check_terminal();
+            Ok(())
         }
-    };
-    let path = path.as_str();
-
-    if path != ":memory:" && !std::path::Path::new(path).exists() {
-        eprintln!("Error: database file '{}' does not exist", path);
-        std::process::exit(1);
+        RunMode::Paths => {
+            print_paths();
+            Ok(())
+        }
     }
+}
+
+async fn open_database(options: OpenOptions) -> anyhow::Result<()> {
+    let path = options.path.as_str();
 
     let orig_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -101,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
 
     let pool = Arc::new(
-        db::open_pool(path, args.readonly)
+        db::open_pool(path, options.readonly)
             .with_context(|| format!("Failed to open database '{}'", path))?,
     );
 
@@ -111,34 +158,53 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
-    // Set up OS-level file watcher (skip for :memory:).
-    let _watcher = if path != ":memory:" {
-        use notify::{EventKind, RecursiveMode, Watcher};
-        let tx_watch = tx.clone();
-        let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res {
-                if matches!(
-                    event.kind,
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-                ) {
-                    let _ = tx_watch.send(Message::FileChanged);
-                }
-            }
-        })?;
-        w.watch(std::path::Path::new(path), RecursiveMode::NonRecursive)?;
-        Some(w)
-    } else {
-        None
-    };
+    let _watcher = create_file_watcher(path, options.watch, tx.clone())?;
 
     let _guard = TerminalGuard::new()?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let mut app = App::new(schema, config, pool, tx, args.readonly, path.to_string());
+    let mut app = App::new(schema, config, pool, tx, options.readonly, path.to_string());
 
     run_event_loop(&mut terminal, &mut app, &mut rx).await?;
 
     Ok(())
+}
+
+fn parse_database_path(value: &str) -> Result<String, String> {
+    if value == ":memory:" || std::path::Path::new(value).exists() {
+        Ok(value.to_string())
+    } else {
+        Err(format!("database file '{value}' does not exist"))
+    }
+}
+
+fn should_watch_database(path: &str, watch: bool) -> bool {
+    watch && path != ":memory:"
+}
+
+fn create_file_watcher(
+    path: &str,
+    watch: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<Message>,
+) -> anyhow::Result<Option<notify::RecommendedWatcher>> {
+    if !should_watch_database(path, watch) {
+        return Ok(None);
+    }
+
+    use notify::{EventKind, RecursiveMode, Watcher};
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            if matches!(
+                event.kind,
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+            ) {
+                let _ = tx.send(Message::FileChanged);
+            }
+        }
+    })?;
+    watcher.watch(std::path::Path::new(path), RecursiveMode::NonRecursive)?;
+    Ok(Some(watcher))
 }
 
 async fn run_event_loop(
@@ -185,6 +251,19 @@ async fn run_event_loop(
     Ok(())
 }
 
+fn print_paths() {
+    print_path_line("config", crate::app_dirs::config_file());
+    print_path_line("data", crate::app_dirs::data_local_dir());
+    print_path_line("filters", crate::app_dirs::filter_dir());
+}
+
+fn print_path_line(label: &str, path: Option<std::path::PathBuf>) {
+    match path {
+        Some(path) => println!("{label}: {}", path.display()),
+        None => println!("{label}: unavailable"),
+    }
+}
+
 fn check_terminal() {
     let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unknown".to_string());
     let color_support = match colorterm.to_lowercase().as_str() {
@@ -216,4 +295,79 @@ fn check_terminal() {
     println!(
         "  Nerd fonts: not detectable (set ui.nerd_font = false in config if icons look wrong)"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn help_lists_open_flags_and_subcommands() {
+        let err = Cli::try_parse_from(["sqview", "--help"]).expect_err("help should exit");
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("--no-watch"));
+        assert!(help.contains("check-terminal"));
+        assert!(help.contains("paths"));
+    }
+
+    #[test]
+    fn version_flag_is_available() {
+        let err = Cli::try_parse_from(["sqview", "--version"]).expect_err("version should exit");
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+        assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn missing_args_show_helpful_usage() {
+        let err = Cli::try_parse_from(["sqview"]).expect_err("missing args should fail");
+        let rendered = err.to_string();
+        assert!(rendered.contains("Usage:"));
+        assert!(rendered.contains("DB_PATH"));
+    }
+
+    #[test]
+    fn open_mode_routes_runtime_flags() {
+        let cli = Cli::try_parse_from(["sqview", ":memory:", "--readonly", "--no-watch"]).unwrap();
+        assert_eq!(
+            cli.into_run_mode(),
+            RunMode::Open(OpenOptions {
+                path: ":memory:".to_string(),
+                readonly: true,
+                watch: false,
+            })
+        );
+    }
+
+    #[test]
+    fn paths_subcommand_routes_without_db_path() {
+        let cli = Cli::try_parse_from(["sqview", "paths"]).unwrap();
+        assert_eq!(cli.into_run_mode(), RunMode::Paths);
+    }
+
+    #[test]
+    fn missing_database_file_is_rejected_by_clap() {
+        let missing = std::env::temp_dir().join(format!(
+            "sqview-cli-missing-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        let missing = missing.display().to_string();
+
+        let err = Cli::try_parse_from(["sqview", &missing]).expect_err("missing DB should fail");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn watch_helper_skips_memory_and_opt_out() {
+        assert!(!should_watch_database(":memory:", true));
+        assert!(!should_watch_database("demo.db", false));
+        assert!(should_watch_database("demo.db", true));
+    }
 }
