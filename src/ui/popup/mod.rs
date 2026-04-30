@@ -2,6 +2,7 @@ pub mod command_palette;
 pub mod date_picker;
 pub mod datetime_picker;
 pub mod filter;
+pub mod find;
 pub mod fk_picker;
 pub mod help;
 pub mod insert_row;
@@ -22,6 +23,7 @@ pub use command_palette::{CommandPaletteState, PaletteCommand};
 pub use date_picker::{DateFocus, DatePickerState};
 pub use datetime_picker::{DatetimeFocus, DatetimePickerState};
 pub use filter::FilterPopupState;
+pub use find::FindState;
 pub use fk_picker::FkPickerState;
 pub use help::HelpState;
 pub use insert_row::InsertRowState;
@@ -39,6 +41,7 @@ pub enum PopupKind {
     FilterPopup(FilterPopupState),
     CommandPalette(CommandPaletteState),
     Help(HelpState),
+    Find(FindState),
 }
 
 pub(crate) fn paint_popup_surface(frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -80,5 +83,6 @@ pub fn render_popup(
             command_palette::render(frame, area, state, theme, config)
         }
         PopupKind::Help(state) => help::render(frame, area, state, theme, config),
+        PopupKind::Find(state) => find::render(frame, area, state, theme, config),
     }
 }

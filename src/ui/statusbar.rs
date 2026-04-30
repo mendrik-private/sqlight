@@ -243,6 +243,7 @@ fn action_hint_text(app: &App) -> Option<String> {
             if app.grid.is_some() {
                 hints.push("[s] sort".to_string());
                 hints.push("[f] filter".to_string());
+                hints.push("[ctrl-f] find".to_string());
             }
             if app
                 .grid

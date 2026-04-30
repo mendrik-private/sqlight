@@ -47,9 +47,9 @@ Filtering & Sorting            Tabs & Sidebar
   s                Cycle sort    Ctrl-B           Toggle sidebar
   f                Filter col    Tab              Switch focus
   Shift-F          Clear filters BackTab          Switch focus
-  j (on FK)        Jump to FK    1-9 / 0          Activate tab 1–10
-  Backspace        Jump back     Click tab        Switch / close tab
-                                 Enter (sidebar)  Open table
+  Ctrl-F           Find in table 1-9 / 0          Activate tab 1–10
+  j (on FK)        Jump to FK    Click tab        Switch / close tab
+  Backspace        Jump back     Enter (sidebar)  Open table
 
 Navigation (sidebar)           Command Palette  (Ctrl-P / Ctrl-Shift-P)
   ↑↓ / k j          Move up/down  Export CSV       Save to ~/sqview_export.csv

@@ -19,8 +19,8 @@ use crate::{
     ui::{
         popup::{
             CommandPaletteState, DateFocus, DatePickerState, DatetimeFocus, DatetimePickerState,
-            FilterPopupState, FkPickerState, HelpState, InsertRowState, PaletteCommand, PopupKind,
-            TextEditorState,
+            FilterPopupState, FindState, FkPickerState, HelpState, InsertRowState, PaletteCommand,
+            PopupKind, TextEditorState,
         },
         sidebar::{SidebarAction, SidebarState},
         tabbar::TabMouseAction,
@@ -253,6 +253,9 @@ pub enum Message {
     CopyCell,
     FileChanged,
     ExternalRefresh(Schema),
+    OpenFind,
+    FindReady(Vec<Vec<SqlValue>>),
+    CommitFind,
 }
 
 impl App {
@@ -908,6 +911,7 @@ impl App {
                     PopupKind::FilterPopup(_) => None,
                     PopupKind::CommandPalette(_) => None,
                     PopupKind::Help(_) => None,
+                    PopupKind::Find(_) => None,
                 });
                 if let Some((table, col, rowid, value, original)) = write_info {
                     self.submit_cell_edit(table, col, rowid, value, original);
@@ -1739,6 +1743,79 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Message::OpenFind => {
+                let Some(ref grid) = self.grid else { return };
+                let table_name = grid.table_name.clone();
+                let columns = grid.columns.clone();
+                let sort = grid.sort.as_ref().map(|s| {
+                    (
+                        grid.columns[s.col_idx].name.clone(),
+                        s.direction == crate::grid::SortDir::Asc,
+                    )
+                });
+                let filter = grid.filter.clone();
+
+                let find_state = FindState::new(table_name.clone(), columns.clone());
+                self.popup = Some(PopupKind::Find(find_state));
+                self.mode = AppMode::Edit;
+                self.dirty = true;
+
+                let pool = Arc::clone(&self.pool);
+                let tx = self.tx.clone();
+                tokio::task::spawn(async move {
+                    let result = tokio::task::spawn_blocking(
+                        move || -> anyhow::Result<Vec<Vec<SqlValue>>> {
+                            let conn = pool.get()?;
+                            let (where_clause, where_params) = filter_to_sql(&filter);
+                            let order_by = sort.as_ref().map(|(s, b)| (s.as_str(), *b));
+                            let rows = db::fetch_rows(
+                                &conn,
+                                db::RowFetch {
+                                    table: &table_name,
+                                    columns: &columns,
+                                    offset: 0,
+                                    limit: 10_000,
+                                    order_by,
+                                    where_clause: &where_clause,
+                                    where_params: &where_params,
+                                },
+                            )?;
+                            Ok(rows)
+                        },
+                    )
+                    .await;
+                    if let Ok(Ok(rows)) = result {
+                        let _ = tx.send(Message::FindReady(rows));
+                    }
+                });
+            }
+            Message::FindReady(rows) => {
+                if let Some(PopupKind::Find(ref mut state)) = self.popup {
+                    state.rows = rows;
+                    state.loading = false;
+                    self.dirty = true;
+                }
+            }
+            Message::CommitFind => {
+                let hit = if let Some(PopupKind::Find(ref state)) = self.popup {
+                    let hits = state.visible_hits();
+                    hits.into_iter()
+                        .nth(state.selected)
+                        .map(|h| (h.abs_row_index, h.first_match_col))
+                } else {
+                    None
+                };
+
+                self.popup = None;
+                self.mode = AppMode::Browse;
+                self.dirty = true;
+
+                if let (Some((abs_row, col)), Some(ref mut grid)) = (hit, self.grid.as_mut()) {
+                    grid.focused_row = abs_row;
+                    grid.focused_col = col.min(grid.columns.len().saturating_sub(1));
+                    grid.needs_fetch = true;
+                }
+            }
         }
     }
 
@@ -2257,6 +2334,15 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             let _ = self.tx.send(Message::OpenCommandPalette);
+            return;
+        }
+
+        // Ctrl-F opens Find popup when a table is open
+        if key.code == KeyCode::Char('f')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.grid.is_some()
+        {
+            let _ = self.tx.send(Message::OpenFind);
             return;
         }
 
@@ -2793,6 +2879,34 @@ impl App {
                 }
                 KeyCode::PageDown => {
                     state.scroll_down(10);
+                    self.dirty = true;
+                }
+                _ => {}
+            },
+            Some(PopupKind::Find(state)) => match key.code {
+                KeyCode::Esc => {
+                    let _ = self.tx.send(Message::ClosePopup);
+                }
+                KeyCode::Enter => {
+                    let _ = self.tx.send(Message::CommitFind);
+                }
+                KeyCode::Up => {
+                    state.move_up();
+                    self.dirty = true;
+                }
+                KeyCode::Down => {
+                    state.move_down();
+                    self.dirty = true;
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    state.push_char(c);
+                    self.dirty = true;
+                }
+                KeyCode::Backspace => {
+                    state.pop_char();
                     self.dirty = true;
                 }
                 _ => {}
