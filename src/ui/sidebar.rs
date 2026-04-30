@@ -114,6 +114,58 @@ impl SidebarState {
         None
     }
 
+    pub fn collapse_selected_section(&mut self, schema: &Schema) -> bool {
+        let views_header = self.views_header_idx(schema);
+        let indexes_header = self.indexes_header_idx(schema);
+
+        let changed = if self.selected == 0 {
+            let changed = self.tables_expanded;
+            self.tables_expanded = false;
+            changed
+        } else if self.selected == views_header {
+            let changed = self.views_expanded;
+            self.views_expanded = false;
+            changed
+        } else if self.selected == indexes_header {
+            let changed = self.indexes_expanded;
+            self.indexes_expanded = false;
+            changed
+        } else {
+            false
+        };
+
+        if changed {
+            self.clamp_selection(schema);
+        }
+        changed
+    }
+
+    pub fn expand_selected_section(&mut self, schema: &Schema) -> bool {
+        let views_header = self.views_header_idx(schema);
+        let indexes_header = self.indexes_header_idx(schema);
+
+        let changed = if self.selected == 0 {
+            let changed = !self.tables_expanded;
+            self.tables_expanded = true;
+            changed
+        } else if self.selected == views_header {
+            let changed = !self.views_expanded;
+            self.views_expanded = true;
+            changed
+        } else if self.selected == indexes_header {
+            let changed = !self.indexes_expanded;
+            self.indexes_expanded = true;
+            changed
+        } else {
+            false
+        };
+
+        if changed {
+            self.clamp_selection(schema);
+        }
+        changed
+    }
+
     pub fn scroll_down(&mut self, schema: &Schema, viewport_rows: usize, n: usize) {
         self.scroll_by(schema, viewport_rows, n as isize);
     }
@@ -199,7 +251,7 @@ pub fn render_sidebar(
         .style(Style::default().bg(theme.bg_soft))
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
-            "▌ SCHEMA",
+            " SCHEMA",
             Style::default()
                 .fg(if focused { theme.accent } else { theme.fg_mute })
                 .add_modifier(Modifier::BOLD),
@@ -234,7 +286,11 @@ pub fn render_sidebar(
 
     let mut items: Vec<ListItem> = Vec::new();
 
-    let tables_arrow = if state.tables_expanded { "▼" } else { "▶" };
+    let tables_arrow = if state.tables_expanded {
+        "📂"
+    } else {
+        "📁"
+    };
     items.push(ListItem::new(Line::from(Span::styled(
         format!("{} TABLES ({})", tables_arrow, schema.tables.len()),
         header_style,
@@ -248,7 +304,7 @@ pub fn render_sidebar(
         }
     }
 
-    let views_arrow = if state.views_expanded { "▼" } else { "▶" };
+    let views_arrow = if state.views_expanded { "📂" } else { "📁" };
     items.push(ListItem::new(Line::from(Span::styled(
         format!("{} VIEWS ({})", views_arrow, schema.views.len()),
         header_style,
@@ -264,7 +320,11 @@ pub fn render_sidebar(
         }
     }
 
-    let indexes_arrow = if state.indexes_expanded { "▼" } else { "▶" };
+    let indexes_arrow = if state.indexes_expanded {
+        "📂"
+    } else {
+        "📁"
+    };
     items.push(ListItem::new(Line::from(Span::styled(
         format!("{} INDEXES ({})", indexes_arrow, schema.indexes.len()),
         header_style,
@@ -282,7 +342,7 @@ pub fn render_sidebar(
 
     let list = List::new(items)
         .highlight_style(accent_style)
-        .highlight_symbol("▸ ");
+        .highlight_symbol("⏵ ");
 
     frame.render_stateful_widget(list, list_area, &mut state.list_state);
     if scrollbar_area.width > 0 {

@@ -2819,6 +2819,12 @@ impl App {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Up => self.sidebar.move_up(&self.schema),
             KeyCode::Down => self.sidebar.move_down(&self.schema),
+            KeyCode::Left => {
+                self.sidebar.collapse_selected_section(&self.schema);
+            }
+            KeyCode::Right => {
+                self.sidebar.expand_selected_section(&self.schema);
+            }
             KeyCode::Enter => {
                 if let Some(SidebarAction::OpenTable(name)) = self.sidebar.enter(&self.schema) {
                     let _ = self.tx.send(Message::OpenTable(name));
@@ -4218,6 +4224,56 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert_ne!(app.sidebar.selected, initial);
+    }
+
+    #[test]
+    fn left_right_arrows_in_sidebar_collapse_and_expand_selected_section() {
+        let (mut app, _rx) = make_test_app();
+        app.focus = FocusPane::Sidebar;
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.sidebar.tables_expanded);
+
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.sidebar.tables_expanded);
+    }
+
+    #[test]
+    fn left_right_arrows_in_sidebar_apply_to_views_and_indexes_headers() {
+        let (mut app, _rx) = make_test_app();
+        app.focus = FocusPane::Sidebar;
+
+        // tables header, first table, views header
+        app.sidebar.move_down(&app.schema);
+        app.sidebar.move_down(&app.schema);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.sidebar.views_expanded);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.sidebar.views_expanded);
+
+        app.sidebar.move_down(&app.schema);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.sidebar.indexes_expanded);
+        app.update(Message::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.sidebar.indexes_expanded);
     }
 
     // ---------- letter jumps ----------
