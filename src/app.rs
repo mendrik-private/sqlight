@@ -1806,14 +1806,38 @@ impl App {
                     None
                 };
 
+                let maybe_fetch =
+                    if let (Some((abs_row, col)), Some(ref mut grid)) = (hit, self.grid.as_mut()) {
+                        grid.focus_cell(abs_row, col);
+                        if grid.needs_fetch && !grid.window.fetch_in_flight {
+                            grid.window.fetch_in_flight = true;
+                            grid.needs_fetch = false;
+                            let (off, lim) = grid.window.fetch_params(grid.focused_row as i64);
+                            let sort = grid.sort.as_ref().and_then(|s| {
+                                grid.columns
+                                    .get(s.col_idx)
+                                    .map(|c| (c.name.clone(), s.direction == SortDir::Asc))
+                            });
+                            Some((
+                                grid.table_name.clone(),
+                                grid.columns.clone(),
+                                sort,
+                                off,
+                                lim,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                 self.popup = None;
                 self.mode = AppMode::Browse;
                 self.dirty = true;
 
-                if let (Some((abs_row, col)), Some(ref mut grid)) = (hit, self.grid.as_mut()) {
-                    grid.focused_row = abs_row;
-                    grid.focused_col = col.min(grid.columns.len().saturating_sub(1));
-                    grid.needs_fetch = true;
+                if let Some((table, cols, sort, off, lim)) = maybe_fetch {
+                    self.spawn_window_fetch(&table, &cols, sort, off, lim);
                 }
             }
         }
@@ -4546,6 +4570,41 @@ mod tests {
         )));
         let msg = try_recv_variant(&mut rx);
         assert!(!msg.contains("JumpToLetter"), "unexpected: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn commit_find_repositions_and_fetches_target_window() {
+        let (mut app, _rx) = make_test_app();
+        let mut grid = make_grid();
+        let find_rows = grid.window.rows.clone();
+        grid.window.rows.truncate(10);
+        grid.window.offset = 0;
+        app.grid = Some(grid);
+
+        let columns = app.grid.as_ref().expect("grid").columns.clone();
+        let mut find = FindState::new("users".to_string(), columns);
+        find.loading = false;
+        find.rows = find_rows;
+        find.query = "user-40".to_string();
+        app.popup = Some(PopupKind::Find(find));
+        app.mode = AppMode::Edit;
+
+        app.update(Message::CommitFind);
+
+        assert!(app.popup.is_none(), "find popup should close after commit");
+        assert_eq!(app.mode, AppMode::Browse);
+
+        let grid = app.grid.as_ref().expect("grid");
+        assert_eq!(grid.focused_row, 40);
+        assert_eq!(grid.focused_col, 1);
+        assert!(
+            grid.viewport_start > 0,
+            "viewport should move to target row"
+        );
+        assert!(
+            grid.window.fetch_in_flight,
+            "jump should start loading the target window immediately"
+        );
     }
 
     // ---------- help popup navigation ----------

@@ -7,6 +7,7 @@ pub mod fk_picker;
 pub mod help;
 pub mod insert_row;
 mod search_result_format;
+mod search_results_table;
 pub mod text_editor;
 pub mod value_picker;
 
