@@ -2,9 +2,9 @@
 
 **sqview** is a keyboard-first terminal viewer for SQLite databases. It is built for fast table browsing, in-place editing, filtering, sorting, and foreign-key navigation without leaving the terminal.
 
-<img width="2880" height="1555" alt="image" src="https://github.com/user-attachments/assets/38ea5b40-a57e-4c49-b3bd-19033f8c7a48" />
+<img width="2874" height="1593" alt="image" src="https://github.com/user-attachments/assets/c4e6ffbb-f28f-40fe-892c-0abf9f2fc5d0" />
 <br/>
-<img width="2880" height="1562" alt="image" src="https://github.com/user-attachments/assets/fc65f848-d136-4be4-abbc-9b0b8da64369" />
+<img width="2874" height="1593" alt="image" src="https://github.com/user-attachments/assets/43446fd9-01b1-4856-999a-2a59e59fb183" />
 
 ## Highlights
 
